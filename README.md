@@ -83,17 +83,7 @@ OsmToolkit uses structured logging via `ILogger<T>`. If a logger is injected int
 
 ---
 
-## Authors
-
-This library was developed by Group 8 as part of the course "Rammeverk og .NET" at [HiØ](https://www.hiof.no):
-
-- Ole Sander Skjørberg
-- Mathias Hem
-- Christian Øyvind Glåmseter
-- Erling Kristoffer Næsset Arnesen
-
----
 
 ## Documentation
 
-For detailed API documentation, usage examples and architecture diagrams, see the full PDF documentation.
+For detailed API documentation, usage examples and architecture diagrams, see the full PDF documentation docs/APIRef.pdf.
