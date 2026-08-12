@@ -1,6 +1,16 @@
 # OsmToolkit
 
+A .NET 8 library for reading, writing, searching and analysing OpenStreetMap data.
+
+Originally developed as a group project by four students in the course
+"Rammeverk og .NET" at Høgskolen i Østfold (releases 1.0.0 and 2.0.0).
+This repository is my continuation of that work.
+
+**Work in progress:** Overpass-based data source, spatial indexing,
+and an MCP server exposing the library to AI agents.
 **OsmToolkit** is a .NET library for reading, writing, and filtering geographic data from [OpenStreetMap (OSM)](https://www.openstreetmap.org/). It provides an API for working with `.osm` XML and Json files, and supports operations on nodes, ways, and relations through the internal `OsmData` model.
+
+
 
 ## ⚠️Warning!⚠️
 Deserializing and using large files will require lots of RAM. We did some testing deserializing the entirity of Norway and it successfully deserialized after 144 minutes, using all of our 32GB of RAM and a lot of the side exchange ram. It is possible, but very slow (estimating 200,000,000 nodes, 12,000,000 ways and 750,000 relations.), will attempt to optimize in the future if possible.
