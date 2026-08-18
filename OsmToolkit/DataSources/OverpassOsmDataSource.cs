@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using OsmToolkit.DataSources.Logging;
@@ -11,8 +12,9 @@ namespace OsmToolkit.DataSources
 {
     /// <summary>
     /// Fetches OSM data for a bounding box live from the Overpass API over HTTP.
+    /// Repeated requests for the same bounds are served from a private, internally-owned in-memory cache.
     /// </summary>
-    internal class OverpassOsmDataSource : IOsmDataSource
+    internal class OverpassOsmDataSource : IOsmDataSource, IDisposable
     {
         /// <summary>
         /// The public Overpass API interpreter endpoint used when no endpoint override is supplied.
@@ -30,6 +32,14 @@ namespace OsmToolkit.DataSources
         /// The default ceiling on a requested bounding box's estimated area, in square kilometers.
         /// </summary>
         internal const double DefaultMaxAreaSquareKilometers = 10_000d;
+        /// <summary>
+        /// The default duration, in minutes, a fetched result is retained in the in-memory cache before expiring.
+        /// </summary>
+        internal const int DefaultCacheDurationMinutes = 15;
+        /// <summary>
+        /// The default total size limit of the in-memory cache, in weighted OSM elements (nodes + ways + relations).
+        /// </summary>
+        internal const long DefaultCacheSizeLimit = 200_000L;
 
         private const string RepositoryUrl = "https://github.com/Skjobbe/osmtoolkit";
         private const string ProductName = "OsmToolkit";
@@ -51,6 +61,8 @@ namespace OsmToolkit.DataSources
         private readonly int _queryTimeoutSeconds;
         private readonly long _queryMaxSizeBytes;
         private readonly double _maxAreaSquareKilometers;
+        private readonly TimeSpan _cacheDuration;
+        private readonly MemoryCache _cache;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="OverpassOsmDataSource"/> class.
@@ -62,6 +74,8 @@ namespace OsmToolkit.DataSources
         /// <param name="queryTimeoutSeconds">The server-side Overpass query execution timeout, in seconds. Defaults to 25 seconds.</param>
         /// <param name="queryMaxSizeBytes">The server-side Overpass query memory ceiling, in bytes. Defaults to 1 GiB.</param>
         /// <param name="maxAreaSquareKilometers">The ceiling on a requested bounding box's estimated area, in square kilometers, above which a request is rejected before any network call. Defaults to 10,000 km².</param>
+        /// <param name="cacheDuration">How long a fetched result is retained in the in-memory cache before expiring. If not provided, defaults to 15 minutes.</param>
+        /// <param name="cacheSizeLimit">The total size limit of the in-memory cache, in weighted OSM elements (nodes + ways + relations). Defaults to 200,000.</param>
         public OverpassOsmDataSource(
             HttpClient? httpClient = null,
             IOsmJsonDeserializer? deserializer = null,
@@ -69,7 +83,9 @@ namespace OsmToolkit.DataSources
             string? endpoint = null,
             int queryTimeoutSeconds = DefaultQueryTimeoutSeconds,
             long queryMaxSizeBytes = DefaultQueryMaxSizeBytes,
-            double maxAreaSquareKilometers = DefaultMaxAreaSquareKilometers)
+            double maxAreaSquareKilometers = DefaultMaxAreaSquareKilometers,
+            TimeSpan? cacheDuration = null,
+            long cacheSizeLimit = DefaultCacheSizeLimit)
         {
             _httpClient = httpClient ?? DefaultHttpClientOverride ?? SharedHttpClient;
             _deserializer = deserializer ?? new OsmJsonDeserializer();
@@ -78,6 +94,8 @@ namespace OsmToolkit.DataSources
             _queryTimeoutSeconds = queryTimeoutSeconds;
             _queryMaxSizeBytes = queryMaxSizeBytes;
             _maxAreaSquareKilometers = maxAreaSquareKilometers;
+            _cacheDuration = cacheDuration ?? TimeSpan.FromMinutes(DefaultCacheDurationMinutes);
+            _cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = cacheSizeLimit });
         }
 
         /// <inheritdoc />
@@ -92,6 +110,13 @@ namespace OsmToolkit.DataSources
                 DataSourceLogMessages.LogAreaRejected(_logger, areaSquareKilometers, _maxAreaSquareKilometers);
                 throw new ArgumentOutOfRangeException(nameof(bounds), areaSquareKilometers,
                     $"Estimated area of {areaSquareKilometers:F0} km² exceeds the maximum allowed area of {_maxAreaSquareKilometers:F0} km².");
+            }
+
+            var cacheKey = (bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude);
+            if (_cache.TryGetValue(cacheKey, out OsmData? cachedData) && cachedData is not null)
+            {
+                DataSourceLogMessages.LogCacheHit(_logger, bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude);
+                return cachedData;
             }
 
             var query = BuildQuery(bounds);
@@ -126,7 +151,23 @@ namespace OsmToolkit.DataSources
 
             DataSourceLogMessages.LogFetchResult(_logger, data.Nodes.Count, data.Ways.Count, data.Relations.Count);
 
+            var weight = data.Nodes.Count + data.Ways.Count + data.Relations.Count;
+            _cache.Set(cacheKey, data, new MemoryCacheEntryOptions
+            {
+                Size = weight,
+                AbsoluteExpirationRelativeToNow = _cacheDuration
+            });
+
             return data;
+        }
+
+        /// <summary>
+        /// Releases the internally-owned in-memory cache.
+        /// </summary>
+        public void Dispose()
+        {
+            _cache.Dispose();
+            GC.SuppressFinalize(this);
         }
 
         private string BuildQuery(OsmCoordinateBounds bounds)

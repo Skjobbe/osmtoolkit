@@ -11,6 +11,7 @@ namespace OsmToolkit.Tests.DataSources
 
         public HttpRequestMessage? LastRequest { get; private set; }
         public string? LastRequestBody { get; private set; }
+        public int InvocationCount { get; private set; }
 
         public FakeHttpMessageHandler(HttpStatusCode statusCode, string responseContent)
         {
@@ -20,6 +21,7 @@ namespace OsmToolkit.Tests.DataSources
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            InvocationCount++;
             LastRequest = request;
             LastRequestBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
 
@@ -237,6 +239,56 @@ namespace OsmToolkit.Tests.DataSources
             await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(
                 () => sut.GetOsmDataAsync(Bounds));
             Assert.IsNull(handler.LastRequest);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenCalledTwiceForSameBounds_SecondCallIsServedFromCache()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var first = await sut.GetOsmDataAsync(Bounds);
+            var second = await sut.GetOsmDataAsync(Bounds);
+
+            // Assert
+            Assert.AreEqual(1, handler.InvocationCount);
+            Assert.AreEqual(first.Nodes.Count, second.Nodes.Count);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenCacheEntryExpires_RefetchesFromNetwork()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient, cacheDuration: TimeSpan.FromMilliseconds(50));
+
+            // Act
+            await sut.GetOsmDataAsync(Bounds);
+            await Task.Delay(200);
+            await sut.GetOsmDataAsync(Bounds);
+
+            // Assert
+            Assert.AreEqual(2, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenEntryExceedsCacheSizeLimit_IsNeverRetainedAndAlwaysRefetches()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient, cacheSizeLimit: 0);
+
+            // Act
+            await sut.GetOsmDataAsync(Bounds);
+            await sut.GetOsmDataAsync(Bounds);
+
+            // Assert
+            Assert.AreEqual(2, handler.InvocationCount);
         }
     }
 }

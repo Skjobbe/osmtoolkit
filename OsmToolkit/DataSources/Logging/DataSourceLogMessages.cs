@@ -8,6 +8,9 @@ namespace OsmToolkit.DataSources.Logging
         [LoggerMessage(LogLevel.Debug, Message = "Fetching OSM data for bounds ({MinLat},{MinLon})-({MaxLat},{MaxLon}) from {Endpoint}.")]
         internal static partial void LogFetchStart(ILogger logger, double minLat, double minLon, double maxLat, double maxLon, string endpoint);
 
+        [LoggerMessage(LogLevel.Debug, Message = "Served OSM data for bounds ({MinLat},{MinLon})-({MaxLat},{MaxLon}) from cache.")]
+        internal static partial void LogCacheHit(ILogger logger, double minLat, double minLon, double maxLat, double maxLon);
+
         [LoggerMessage(LogLevel.Debug, Message = "Fetched OSM data: {NodeCount} nodes, {WayCount} ways, {RelationCount} relations.")]
         internal static partial void LogFetchResult(ILogger logger, int nodeCount, int wayCount, int relationCount);
 
