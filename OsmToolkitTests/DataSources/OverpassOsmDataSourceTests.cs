@@ -140,6 +140,48 @@ namespace OsmToolkit.Tests.DataSources
         }
 
         [TestMethod]
+        public async Task GetOsmDataAsync_WhenResponseHasRemarkField_ThrowsInvalidOperationExceptionWithRemarkText()
+        {
+            // Arrange
+            const string remarkText = "runtime error: Query timed out in \"query\" at line 5 after 26 seconds.";
+            var escapedRemarkText = remarkText.Replace("\"", "\\\"");
+            var remarkJson = $$"""
+                {
+                  "version": 0.6,
+                  "generator": "Overpass API",
+                  "elements": [],
+                  "remark": "{{escapedRemarkText}}"
+                }
+                """;
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, remarkJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var exception = await Assert.ThrowsExceptionAsync<InvalidOperationException>(
+                () => sut.GetOsmDataAsync(Bounds));
+
+            // Assert
+            Assert.AreEqual(remarkText, exception.Message);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenResponseHasNoRemarkField_ReturnsParsedDataNormally()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var result = await sut.GetOsmDataAsync(Bounds);
+
+            // Assert
+            Assert.IsNotNull(result);
+            Assert.AreEqual(1, result.Nodes.Count);
+        }
+
+        [TestMethod]
         public async Task GetOsmDataAsync_WhenBoundsIsNull_ThrowsArgumentNullException()
         {
             // Arrange

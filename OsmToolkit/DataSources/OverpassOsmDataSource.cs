@@ -5,6 +5,7 @@ using OsmToolkit.Serialization.Json;
 using System.Globalization;
 using System.Net.Http.Headers;
 using System.Reflection;
+using System.Text.Json;
 
 namespace OsmToolkit.DataSources
 {
@@ -113,6 +114,14 @@ namespace OsmToolkit.DataSources
             response.EnsureSuccessStatusCode();
 
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            var remark = TryGetRemark(body);
+            if (remark is not null)
+            {
+                DataSourceLogMessages.LogRemarkDetected(_logger, remark);
+                throw new InvalidOperationException(remark);
+            }
+
             var data = await _deserializer.DeserializeAsync(body, cancellationToken);
 
             DataSourceLogMessages.LogFetchResult(_logger, data.Nodes.Count, data.Ways.Count, data.Relations.Count);
@@ -138,6 +147,18 @@ namespace OsmToolkit.DataSources
                 >;
                 out skel qt;
                 """;
+        }
+
+        /// <summary>
+        /// Checks the raw Overpass response body for a top-level <c>remark</c> field, which Overpass sets on an HTTP 200
+        /// response when the query failed server-side (e.g. hit the execution timeout or memory ceiling).
+        /// </summary>
+        private static string? TryGetRemark(string body)
+        {
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement.TryGetProperty("remark", out var remarkElement) && remarkElement.ValueKind == JsonValueKind.String
+                ? remarkElement.GetString()
+                : null;
         }
 
         private static double EstimateAreaSquareKilometers(OsmCoordinateBounds bounds)

@@ -16,5 +16,8 @@ namespace OsmToolkit.DataSources.Logging
 
         [LoggerMessage(LogLevel.Warning, Message = "Rejected request: estimated area {AreaSquareKilometers} km² exceeds maximum allowed area {MaxAreaSquareKilometers} km².")]
         internal static partial void LogAreaRejected(ILogger logger, double areaSquareKilometers, double maxAreaSquareKilometers);
+
+        [LoggerMessage(LogLevel.Error, Message = "Overpass query failed server-side: {Remark}")]
+        internal static partial void LogRemarkDetected(ILogger logger, string remark);
     }
 }
