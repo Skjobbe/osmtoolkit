@@ -12,9 +12,9 @@ namespace OsmToolkit.DataSources
 {
     /// <summary>
     /// Fetches OSM data for a bounding box live from the Overpass API over HTTP.
-    /// Repeated requests for the same bounds are served from a private, internally-owned in-memory cache.
+    /// Repeated requests for the same bounds are served from an in-memory cache.
     /// </summary>
-    internal class OverpassOsmDataSource : IOsmDataSource, IDisposable
+    internal class OverpassOsmDataSource : IOsmDataSource
     {
         /// <summary>
         /// The public Overpass API interpreter endpoint used when no endpoint override is supplied.
@@ -46,6 +46,7 @@ namespace OsmToolkit.DataSources
         private const double KilometersPerDegreeLatitude = 111.32d;
 
         private static readonly HttpClient SharedHttpClient = new();
+        private static readonly IMemoryCache SharedCache = new MemoryCache(new MemoryCacheOptions { SizeLimit = DefaultCacheSizeLimit });
         private static readonly string ProductVersion = ResolveProductVersion();
 
         /// <summary>
@@ -53,6 +54,12 @@ namespace OsmToolkit.DataSources
         /// Not intended for use by consumers; only visible within this assembly and to <c>OsmToolkitTests</c>.
         /// </summary>
         internal static HttpClient? DefaultHttpClientOverride { get; set; }
+
+        /// <summary>
+        /// Test seam allowing the internally-owned default <see cref="IMemoryCache"/> to be swapped out for a fresh instance per test.
+        /// Not intended for use by consumers; only visible within this assembly and to <c>OsmToolkitTests</c>.
+        /// </summary>
+        internal static IMemoryCache? DefaultCacheOverride { get; set; }
 
         private readonly HttpClient _httpClient;
         private readonly IOsmJsonDeserializer _deserializer;
@@ -62,7 +69,7 @@ namespace OsmToolkit.DataSources
         private readonly long _queryMaxSizeBytes;
         private readonly double _maxAreaSquareKilometers;
         private readonly TimeSpan _cacheDuration;
-        private readonly MemoryCache _cache;
+        private readonly IMemoryCache _cache;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="OverpassOsmDataSource"/> class.
@@ -75,7 +82,7 @@ namespace OsmToolkit.DataSources
         /// <param name="queryMaxSizeBytes">The server-side Overpass query memory ceiling, in bytes. Defaults to 1 GiB.</param>
         /// <param name="maxAreaSquareKilometers">The ceiling on a requested bounding box's estimated area, in square kilometers, above which a request is rejected before any network call. Defaults to 10,000 km².</param>
         /// <param name="cacheDuration">How long a fetched result is retained in the in-memory cache before expiring. If not provided, defaults to 15 minutes.</param>
-        /// <param name="cacheSizeLimit">The total size limit of the in-memory cache, in weighted OSM elements (nodes + ways + relations). Defaults to 200,000.</param>
+        /// <param name="cache">An optional <see cref="IMemoryCache"/> used to cache fetched results, typically the singleton registered by <c>AddOsmToolkit()</c>. If not provided, an internally-owned shared instance is used.</param>
         public OverpassOsmDataSource(
             HttpClient? httpClient = null,
             IOsmJsonDeserializer? deserializer = null,
@@ -85,7 +92,7 @@ namespace OsmToolkit.DataSources
             long queryMaxSizeBytes = DefaultQueryMaxSizeBytes,
             double maxAreaSquareKilometers = DefaultMaxAreaSquareKilometers,
             TimeSpan? cacheDuration = null,
-            long cacheSizeLimit = DefaultCacheSizeLimit)
+            IMemoryCache? cache = null)
         {
             _httpClient = httpClient ?? DefaultHttpClientOverride ?? SharedHttpClient;
             _deserializer = deserializer ?? new OsmJsonDeserializer();
@@ -95,7 +102,7 @@ namespace OsmToolkit.DataSources
             _queryMaxSizeBytes = queryMaxSizeBytes;
             _maxAreaSquareKilometers = maxAreaSquareKilometers;
             _cacheDuration = cacheDuration ?? TimeSpan.FromMinutes(DefaultCacheDurationMinutes);
-            _cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = cacheSizeLimit });
+            _cache = cache ?? DefaultCacheOverride ?? SharedCache;
         }
 
         /// <inheritdoc />
@@ -116,7 +123,7 @@ namespace OsmToolkit.DataSources
             if (_cache.TryGetValue(cacheKey, out OsmData? cachedData) && cachedData is not null)
             {
                 DataSourceLogMessages.LogCacheHit(_logger, bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude);
-                return cachedData;
+                return CloneForCaller(cachedData);
             }
 
             var query = BuildQuery(bounds);
@@ -158,17 +165,15 @@ namespace OsmToolkit.DataSources
                 AbsoluteExpirationRelativeToNow = _cacheDuration
             });
 
-            return data;
+            return CloneForCaller(data);
         }
 
         /// <summary>
-        /// Releases the internally-owned in-memory cache.
+        /// Creates a shallow copy of <paramref name="data"/> so the instance held by the cache is never handed
+        /// out directly, preventing a caller's mutation of its own result from corrupting the cached entry.
         /// </summary>
-        public void Dispose()
-        {
-            _cache.Dispose();
-            GC.SuppressFinalize(this);
-        }
+        private static OsmData CloneForCaller(OsmData data) =>
+            new(data.Header, data.Bounds, data.Nodes, data.Ways, data.Relations);
 
         private string BuildQuery(OsmCoordinateBounds bounds)
         {
@@ -196,10 +201,17 @@ namespace OsmToolkit.DataSources
         /// </summary>
         private static string? TryGetRemark(string body)
         {
-            using var document = JsonDocument.Parse(body);
-            return document.RootElement.TryGetProperty("remark", out var remarkElement) && remarkElement.ValueKind == JsonValueKind.String
-                ? remarkElement.GetString()
-                : null;
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                return document.RootElement.TryGetProperty("remark", out var remarkElement) && remarkElement.ValueKind == JsonValueKind.String
+                    ? remarkElement.GetString()
+                    : null;
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidOperationException("Overpass returned a response that could not be parsed as JSON.", ex);
+            }
         }
 
         private static double EstimateAreaSquareKilometers(OsmCoordinateBounds bounds)

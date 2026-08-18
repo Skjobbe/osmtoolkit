@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Caching.Memory;
 using OsmToolkit.DataSources;
 using System.Net;
 using System.Text;
@@ -47,10 +48,22 @@ namespace OsmToolkit.Tests.DataSources
 
         private static readonly OsmCoordinateBounds Bounds = new(10.0, 20.0, 10.5, 20.5);
 
+        [TestInitialize]
+        public void Initialize()
+        {
+            // A fresh cache per test keeps tests isolated from each other, since the constructor
+            // falls back to this override instead of the process-wide shared default cache.
+            OverpassOsmDataSource.DefaultCacheOverride = new MemoryCache(new MemoryCacheOptions
+            {
+                SizeLimit = OverpassOsmDataSource.DefaultCacheSizeLimit
+            });
+        }
+
         [TestCleanup]
         public void Cleanup()
         {
             OverpassOsmDataSource.DefaultHttpClientOverride = null;
+            OverpassOsmDataSource.DefaultCacheOverride = null;
         }
 
         [TestMethod]
@@ -281,7 +294,8 @@ namespace OsmToolkit.Tests.DataSources
             // Arrange
             var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
             var httpClient = new HttpClient(handler);
-            var sut = new OverpassOsmDataSource(httpClient, cacheSizeLimit: 0);
+            var tinyCache = new MemoryCache(new MemoryCacheOptions { SizeLimit = 0 });
+            var sut = new OverpassOsmDataSource(httpClient, cache: tinyCache);
 
             // Act
             await sut.GetOsmDataAsync(Bounds);
@@ -289,6 +303,38 @@ namespace OsmToolkit.Tests.DataSources
 
             // Assert
             Assert.AreEqual(2, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenCallerMutatesReturnedResult_CachedEntryIsUnaffected()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var first = await sut.GetOsmDataAsync(Bounds);
+            first.Nodes.Add(new Node(999, 0, 0));
+            first.SortOsmData();
+            var second = await sut.GetOsmDataAsync(Bounds);
+
+            // Assert
+            Assert.AreEqual(1, second.Nodes.Count);
+            Assert.AreEqual(1, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenResponseBodyIsNotJson_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, "<html>rate limited</html>");
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act & Assert
+            await Assert.ThrowsExceptionAsync<InvalidOperationException>(
+                () => sut.GetOsmDataAsync(Bounds));
         }
     }
 }
