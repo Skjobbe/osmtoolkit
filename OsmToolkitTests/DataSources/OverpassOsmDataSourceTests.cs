@@ -43,7 +43,7 @@ namespace OsmToolkit.Tests.DataSources
             }
             """;
 
-        private static readonly OsmCoordinateBounds Bounds = new(10.0, 20.0, 11.0, 21.0);
+        private static readonly OsmCoordinateBounds Bounds = new(10.0, 20.0, 10.5, 20.5);
 
         [TestCleanup]
         public void Cleanup()
@@ -150,6 +150,51 @@ namespace OsmToolkit.Tests.DataSources
             // Act & Assert
             await Assert.ThrowsExceptionAsync<ArgumentNullException>(
                 () => sut.GetOsmDataAsync(null!));
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenBoundsExceedDefaultAreaCeiling_ThrowsWithoutInvokingHttpHandler()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+            var oversizedBounds = new OsmCoordinateBounds(0.0, 0.0, 10.0, 10.0);
+
+            // Act & Assert
+            await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(
+                () => sut.GetOsmDataAsync(oversizedBounds));
+            Assert.IsNull(handler.LastRequest);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenBoundsUnderDefaultAreaCeiling_ProceedsNormally()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var result = await sut.GetOsmDataAsync(Bounds);
+
+            // Assert
+            Assert.IsNotNull(result);
+            Assert.IsNotNull(handler.LastRequest);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithCustomAreaCeiling_RejectsBoundsWithinDefaultButOverCustomCeiling()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient, maxAreaSquareKilometers: 100);
+
+            // Act & Assert
+            await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(
+                () => sut.GetOsmDataAsync(Bounds));
+            Assert.IsNull(handler.LastRequest);
         }
     }
 }

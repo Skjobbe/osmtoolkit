@@ -13,5 +13,8 @@ namespace OsmToolkit.DataSources.Logging
 
         [LoggerMessage(LogLevel.Error, Message = "Overpass request failed with status code {StatusCode}.")]
         internal static partial void LogFetchFailed(ILogger logger, HttpStatusCode statusCode);
+
+        [LoggerMessage(LogLevel.Warning, Message = "Rejected request: estimated area {AreaSquareKilometers} km² exceeds maximum allowed area {MaxAreaSquareKilometers} km².")]
+        internal static partial void LogAreaRejected(ILogger logger, double areaSquareKilometers, double maxAreaSquareKilometers);
     }
 }
