@@ -3,9 +3,11 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using OsmToolkit.DataSources.Logging;
 using OsmToolkit.Serialization.Json;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http.Headers;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 
 namespace OsmToolkit.DataSources
@@ -48,6 +50,15 @@ namespace OsmToolkit.DataSources
         private static readonly HttpClient SharedHttpClient = new();
         private static readonly IMemoryCache SharedCache = new MemoryCache(new MemoryCacheOptions { SizeLimit = DefaultCacheSizeLimit });
         private static readonly string ProductVersion = ResolveProductVersion();
+
+        /// <summary>
+        /// Tracks in-flight Overpass fetches per cache instance, so that concurrent requests for identical bounds
+        /// that both land during a cache miss coalesce into a single outbound request instead of each issuing
+        /// their own. Scoped by cache instance (via a <see cref="ConditionalWeakTable{TKey,TValue}"/>) rather than
+        /// held as a single static dictionary, so it naturally mirrors the sharing/isolation of whichever cache
+        /// instance a given source is using — the process-wide default, or a caller-supplied one.
+        /// </summary>
+        private static readonly ConditionalWeakTable<IMemoryCache, ConcurrentDictionary<CacheKey, Lazy<Task<OsmData>>>> InFlightFetchesByCache = new();
 
         /// <summary>
         /// Test seam allowing the internally-owned default <see cref="HttpClient"/> to be swapped out for a fake handler.
@@ -119,13 +130,43 @@ namespace OsmToolkit.DataSources
                     $"Estimated area of {areaSquareKilometers:F0} km² exceeds the maximum allowed area of {_maxAreaSquareKilometers:F0} km².");
             }
 
-            var cacheKey = (bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude);
+            var cacheKey = new CacheKey(bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude);
             if (_cache.TryGetValue(cacheKey, out OsmData? cachedData) && cachedData is not null)
             {
                 DataSourceLogMessages.LogCacheHit(_logger, bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude);
                 return CloneForCaller(cachedData);
             }
 
+            var data = await FetchCoalescedAsync(bounds, cacheKey, cancellationToken);
+            return CloneForCaller(data);
+        }
+
+        /// <summary>
+        /// Coalesces concurrent fetches for identical <paramref name="cacheKey"/> bounds so that overlapping cache
+        /// misses share a single outbound Overpass request instead of each issuing their own. The winning caller's
+        /// <paramref name="cancellationToken"/> governs the shared request; a losing caller that cancels only stops
+        /// waiting on its own await, it does not cancel the in-flight fetch other callers are still waiting on.
+        /// </summary>
+        private async Task<OsmData> FetchCoalescedAsync(OsmCoordinateBounds bounds, CacheKey cacheKey, CancellationToken cancellationToken)
+        {
+            var inFlight = InFlightFetchesByCache.GetValue(_cache, static _ => new ConcurrentDictionary<CacheKey, Lazy<Task<OsmData>>>());
+
+            var lazyFetch = inFlight.GetOrAdd(
+                cacheKey,
+                _ => new Lazy<Task<OsmData>>(() => FetchAndCacheAsync(bounds, cacheKey, cancellationToken), LazyThreadSafetyMode.ExecutionAndPublication));
+
+            try
+            {
+                return await lazyFetch.Value;
+            }
+            finally
+            {
+                inFlight.TryRemove(new KeyValuePair<CacheKey, Lazy<Task<OsmData>>>(cacheKey, lazyFetch));
+            }
+        }
+
+        private async Task<OsmData> FetchAndCacheAsync(OsmCoordinateBounds bounds, CacheKey cacheKey, CancellationToken cancellationToken)
+        {
             var query = BuildQuery(bounds);
 
             using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint)
@@ -147,14 +188,13 @@ namespace OsmToolkit.DataSources
 
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
-            var remark = TryGetRemark(body);
-            if (remark is not null)
-            {
-                DataSourceLogMessages.LogRemarkDetected(_logger, remark);
-                throw new InvalidOperationException(remark);
-            }
-
-            var data = await _deserializer.DeserializeAsync(body, cancellationToken);
+            // Parsing the response body as JSON is potentially expensive for a large bounding box, so the remark
+            // check and the deserialize both reuse a single parse: when the default deserializer is in use, the
+            // document parsed here is handed straight to it; only a caller-supplied, non-default deserializer
+            // (which only exposes a string-based API) falls back to letting it parse the body itself.
+            var data = _deserializer is OsmJsonDeserializer concreteDeserializer
+                ? ParseResponse(body, concreteDeserializer)
+                : await ParseResponseAsync(body, cancellationToken);
 
             DataSourceLogMessages.LogFetchResult(_logger, data.Nodes.Count, data.Ways.Count, data.Relations.Count);
 
@@ -165,7 +205,44 @@ namespace OsmToolkit.DataSources
                 AbsoluteExpirationRelativeToNow = _cacheDuration
             });
 
-            return CloneForCaller(data);
+            return data;
+        }
+
+        private OsmData ParseResponse(string body, OsmJsonDeserializer deserializer)
+        {
+            JsonDocument document;
+            try
+            {
+                document = JsonDocument.Parse(body);
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidOperationException("Overpass returned a response that could not be parsed as JSON.", ex);
+            }
+
+            using (document)
+            {
+                var remark = TryGetRemark(document.RootElement);
+                if (remark is not null)
+                {
+                    DataSourceLogMessages.LogRemarkDetected(_logger, remark);
+                    throw new InvalidOperationException(remark);
+                }
+
+                return deserializer.Deserialize(document);
+            }
+        }
+
+        private async Task<OsmData> ParseResponseAsync(string body, CancellationToken cancellationToken)
+        {
+            var remark = TryGetRemark(body);
+            if (remark is not null)
+            {
+                DataSourceLogMessages.LogRemarkDetected(_logger, remark);
+                throw new InvalidOperationException(remark);
+            }
+
+            return await _deserializer.DeserializeAsync(body, cancellationToken);
         }
 
         /// <summary>
@@ -174,6 +251,11 @@ namespace OsmToolkit.DataSources
         /// </summary>
         private static OsmData CloneForCaller(OsmData data) =>
             new(data.Header, data.Bounds, data.Nodes, data.Ways, data.Relations);
+
+        /// <summary>
+        /// Cache and in-flight-fetch key derived from a bounding box's four coordinate values, using exact equality.
+        /// </summary>
+        private readonly record struct CacheKey(double MinimumLatitude, double MinimumLongitude, double MaximumLatitude, double MaximumLongitude);
 
         private string BuildQuery(OsmCoordinateBounds bounds)
         {
@@ -204,15 +286,18 @@ namespace OsmToolkit.DataSources
             try
             {
                 using var document = JsonDocument.Parse(body);
-                return document.RootElement.TryGetProperty("remark", out var remarkElement) && remarkElement.ValueKind == JsonValueKind.String
-                    ? remarkElement.GetString()
-                    : null;
+                return TryGetRemark(document.RootElement);
             }
             catch (JsonException ex)
             {
                 throw new InvalidOperationException("Overpass returned a response that could not be parsed as JSON.", ex);
             }
         }
+
+        private static string? TryGetRemark(JsonElement root) =>
+            root.TryGetProperty("remark", out var remarkElement) && remarkElement.ValueKind == JsonValueKind.String
+                ? remarkElement.GetString()
+                : null;
 
         private static double EstimateAreaSquareKilometers(OsmCoordinateBounds bounds)
         {
