@@ -1,5 +1,7 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using OsmToolkit.DataSources;
 using OsmToolkit.Finders;
 using OsmToolkit.Serialization.Json;
 using OsmToolkit.Serialization.Xml;
@@ -30,6 +32,8 @@ namespace OsmToolkit
             services.TryAddTransient<INearestNodesFinder, OsmEntityFinder>();
             services.TryAddTransient<IWithinDistanceFinder<OsmEntity>, OsmEntityFinder>();
             services.TryAddTransient<IShortestPathFinder, OsmEntityFinder>();
+            services.AddMemoryCache(options => options.SizeLimit = OverpassOsmDataSource.DefaultCacheSizeLimit);
+            services.TryAddTransient<IOsmDataSource, OverpassOsmDataSource>();
 
             return services;
         }
