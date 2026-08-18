@@ -134,8 +134,6 @@ namespace OsmToolkit.Serialization.Xml
             await xmlWriter.WriteAttributeStringAsync(null, "lon", null, node.Longitude.ToString(CultureInfo.InvariantCulture));
 
 
-            // Husk å sjekk at ingen error hvis tag er empty!!!!------
-            // Tror denne skal funke, men sjekk i test
             if (node.Tags.Count > 0)
             {
                 foreach (var tag in node.Tags)
