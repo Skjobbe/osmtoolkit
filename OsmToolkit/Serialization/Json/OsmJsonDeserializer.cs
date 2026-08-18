@@ -54,20 +54,29 @@ namespace OsmToolkit.Serialization.Json
 
         private async Task<OsmData> DeserializeWithReaderAsync(Stream stream, CancellationToken cancellationToken = default)
         {
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            return Deserialize(document);
+        }
+
+        /// <summary>
+        /// Deserializes OSM JSON from an already-parsed <see cref="JsonDocument"/>, so a caller that has already
+        /// parsed the response for another purpose (e.g. <see cref="OsmToolkit.DataSources.OverpassOsmDataSource"/>
+        /// checking for an Overpass "remark" field) doesn't pay the cost of parsing it again.
+        /// </summary>
+        internal OsmData Deserialize(JsonDocument document)
+        {
             var options = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
                 Converters = { new JsonStringEnumConverter() }
             };
 
-            using var probe = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-            bool isOverpass = probe.RootElement.TryGetProperty("elements", out _);
-
-            stream.Position = 0;
+            var root = document.RootElement;
+            bool isOverpass = root.TryGetProperty("elements", out _);
 
             if (isOverpass)
             {
-                var overpass = await JsonSerializer.DeserializeAsync<OverpassJsonDto>(stream, options, cancellationToken)
+                var overpass = root.Deserialize<OverpassJsonDto>(options)
                     ?? throw new InvalidDataException("Failed to deserialize Overpass JSON.");
                 var resultData = OsmDataDto.FromOverpassJson(overpass);
                 SerializationLogMessages.LogDeserializeAsync(_logger, resultData.Nodes.Count, resultData.Ways.Count, resultData.Relations.Count);
@@ -75,16 +84,13 @@ namespace OsmToolkit.Serialization.Json
             }
             else
             {
-                var dto = await JsonSerializer.DeserializeAsync<OsmDataDto>(stream, options, cancellationToken)
+                var dto = root.Deserialize<OsmDataDto>(options)
                     ?? throw new InvalidDataException("Failed to deserialize JSON data.");
 
                 var resultData = dto.FromJson();
                 SerializationLogMessages.LogDeserializeAsync(_logger, resultData.Nodes.Count, resultData.Ways.Count, resultData.Relations.Count);
                 return resultData;
             }
-                
-
-            
         }
     }
 }

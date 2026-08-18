@@ -9,15 +9,17 @@ namespace OsmToolkit.Tests.DataSources
     {
         private readonly HttpStatusCode _statusCode;
         private readonly string _responseContent;
+        private readonly TimeSpan _delay;
 
         public HttpRequestMessage? LastRequest { get; private set; }
         public string? LastRequestBody { get; private set; }
         public int InvocationCount { get; private set; }
 
-        public FakeHttpMessageHandler(HttpStatusCode statusCode, string responseContent)
+        public FakeHttpMessageHandler(HttpStatusCode statusCode, string responseContent, TimeSpan? delay = null)
         {
             _statusCode = statusCode;
             _responseContent = responseContent;
+            _delay = delay ?? TimeSpan.Zero;
         }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -25,6 +27,9 @@ namespace OsmToolkit.Tests.DataSources
             InvocationCount++;
             LastRequest = request;
             LastRequestBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+
+            if (_delay > TimeSpan.Zero)
+                await Task.Delay(_delay, cancellationToken);
 
             return new HttpResponseMessage(_statusCode)
             {
@@ -269,6 +274,25 @@ namespace OsmToolkit.Tests.DataSources
             // Assert
             Assert.AreEqual(1, handler.InvocationCount);
             Assert.AreEqual(first.Nodes.Count, second.Nodes.Count);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenCalledConcurrentlyForSameBoundsDuringCacheMiss_CoalescesIntoSingleRequest()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson, delay: TimeSpan.FromMilliseconds(200));
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var firstTask = sut.GetOsmDataAsync(Bounds);
+            var secondTask = sut.GetOsmDataAsync(Bounds);
+            var results = await Task.WhenAll(firstTask, secondTask);
+
+            // Assert
+            Assert.AreEqual(1, handler.InvocationCount);
+            Assert.AreEqual(1, results[0].Nodes.Count);
+            Assert.AreEqual(1, results[1].Nodes.Count);
         }
 
         [TestMethod]
