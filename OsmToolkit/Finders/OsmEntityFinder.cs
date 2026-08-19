@@ -251,25 +251,11 @@ namespace OsmToolkit.Finders
             if (data == null)
                 throw new ArgumentNullException(nameof(data), "Data cannot be null, must be defined.");
 
-            Node? foundNode = null;
+            Node? foundNode = GetGridIndex(data).FindNearest(latitude, longitude);
 
-            foreach (Node node in data.Nodes)
-            {
-                if (foundNode == null || CalculateCoordinatesToMeters(latitude, longitude, node.Latitude, node.Longitude) < CalculateCoordinatesToMeters(latitude, longitude, foundNode.Latitude, foundNode.Longitude))
-                    foundNode = node;
-            }
+            LogFindNearestNodeResult(latitude, longitude, foundNode);
 
-            if (foundNode != null)
-            {
-                var distanceFromStartPoint = CalculateCoordinatesToMeters(latitude, longitude, foundNode.Latitude, foundNode.Longitude);
-                FinderLogMessages.LogFindNearestNodeResults(_logger, latitude, longitude, foundNode.Id, foundNode.Latitude, foundNode.Longitude, distanceFromStartPoint);
-            }
-            else
-            {
-                FinderLogMessages.LogFindNearestNodeUnable(_logger, latitude, longitude);
-            }
-
-                return foundNode;
+            return foundNode;
         }
 
         /// <summary>
@@ -289,7 +275,15 @@ namespace OsmToolkit.Finders
             if (tags == null)
                 throw new ArgumentNullException(nameof(tags), "Tags cannot be null, must be defined.");
 
-            return FindNearestNode(FindByTags(data, tags), latitude, longitude);
+            // Not backed by the grid index: FindByTags returns a fresh, single-use OsmData that the
+            // ConditionalWeakTable-keyed index cache would never see again (see ADR-07).
+            OsmData filteredData = FindByTags(data, tags);
+
+            Node? foundNode = FindNearestNodeLinear(filteredData.Nodes, latitude, longitude);
+
+            LogFindNearestNodeResult(latitude, longitude, foundNode);
+
+            return foundNode;
         }
 
 
@@ -636,6 +630,36 @@ namespace OsmToolkit.Finders
         /// </summary>
         private static GridNodeIndex GetGridIndex(OsmData data)
             => GridIndexByData.GetValue(data, static d => GridNodeIndex.Build(d.Nodes));
+
+        /// <summary>
+        /// Linear-scan fallback used by the tag-filtered <see cref="FindNearestNode(OsmData, double, double, Dictionary{string, string})"/>
+        /// overload, which searches a freshly filtered, single-use <see cref="OsmData"/> that the grid index cache never reuses.
+        /// </summary>
+        private static Node? FindNearestNodeLinear(IEnumerable<Node> nodes, double latitude, double longitude)
+        {
+            Node? foundNode = null;
+
+            foreach (Node node in nodes)
+            {
+                if (foundNode == null || CalculateCoordinatesToMeters(latitude, longitude, node.Latitude, node.Longitude) < CalculateCoordinatesToMeters(latitude, longitude, foundNode.Latitude, foundNode.Longitude))
+                    foundNode = node;
+            }
+
+            return foundNode;
+        }
+
+        private void LogFindNearestNodeResult(double latitude, double longitude, Node? foundNode)
+        {
+            if (foundNode != null)
+            {
+                var distanceFromStartPoint = CalculateCoordinatesToMeters(latitude, longitude, foundNode.Latitude, foundNode.Longitude);
+                FinderLogMessages.LogFindNearestNodeResults(_logger, latitude, longitude, foundNode.Id, foundNode.Latitude, foundNode.Longitude, distanceFromStartPoint);
+            }
+            else
+            {
+                FinderLogMessages.LogFindNearestNodeUnable(_logger, latitude, longitude);
+            }
+        }
 
         private bool IsInSameWayOrRelation(Node queryNode, IEnumerable<Node> resultNodes, OsmData data, bool allowSameWay, bool allowSameRelation)
         {

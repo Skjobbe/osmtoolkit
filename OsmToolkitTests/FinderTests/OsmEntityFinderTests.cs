@@ -456,6 +456,147 @@ namespace OsmToolkit.FindersTests
         }
 
         [TestMethod()]
+        public void FindNearestNode_NearestNodeInAdjacentGridCell_ShouldStillBeReturned()
+        {
+            // Arrange: two candidate nodes on either side of a cell boundary from the query point. The true
+            // nearest node sits just across the boundary in the neighboring cell, while a farther node shares
+            // the query point's own cell - an expanding-ring search that stopped at ring 0 would wrongly
+            // prefer the farther, same-cell node.
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(59.0, 10.0, 61.0, 12.0);
+            var factory = new OsmEntityFactory();
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            const double referenceLatitude = 60.0;
+            double longitudeCellSizeDegrees = GridNodeIndex.DefaultCellSizeMeters / GeoDistance.MetersPerDegreeLongitude(referenceLatitude);
+
+            long columnIndex = (long)Math.Round(10.75 / longitudeCellSizeDegrees);
+            double cellBoundaryLongitude = columnIndex * longitudeCellSizeDegrees;
+
+            // Query point sits just inside its own cell, close to the boundary.
+            double queryLatitude = referenceLatitude;
+            double queryLongitude = cellBoundaryLongitude - (5d / GeoDistance.MetersPerDegreeLongitude(queryLatitude));
+
+            // Nearest node: just across the boundary, in the neighboring cell, ~10m from the query point.
+            var nearestNode = factory.CreateNode(1, queryLatitude, cellBoundaryLongitude + (5d / GeoDistance.MetersPerDegreeLongitude(queryLatitude)));
+
+            // Farther node: shares the query point's own cell, but ~200m away.
+            var sameCellFarNode = factory.CreateNode(2, queryLatitude, queryLongitude - (200d / GeoDistance.MetersPerDegreeLongitude(queryLatitude)));
+
+            var data = new OsmData(header, bounds, new[] { nearestNode, sameCellFarNode });
+
+            // Act
+            var actual = finder.FindNearestNode(data, queryLatitude, queryLongitude);
+
+            // Assert
+            Assert.IsNotNull(actual);
+            Assert.AreEqual(1L, actual!.Id);
+        }
+
+        [TestMethod()]
+        public void FindNearestNode_SingleNodeDataset_ShouldReturnThatNode()
+        {
+            // Arrange
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(40.0, -76.0, 42.0, -73.0);
+            var factory = new OsmEntityFactory();
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            var node = factory.CreateNode(1, 40.7128, -74.0060);
+            var data = new OsmData(header, bounds, new[] { node });
+
+            // Act
+            var actual = finder.FindNearestNode(data, 41.0, -75.0);
+
+            // Assert
+            Assert.IsNotNull(actual);
+            Assert.AreEqual(1L, actual!.Id);
+        }
+
+        [TestMethod()]
+        public void FindNearestNode_EmptyDataset_ShouldReturnNull()
+        {
+            // Arrange
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(40.0, -76.0, 42.0, -73.0);
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            // Act
+            var actual = finder.FindNearestNode(new OsmData(header, bounds), 40.7128, -74.0060);
+
+            // Assert
+            Assert.IsNull(actual);
+        }
+
+        [TestMethod()]
+        public void FindNearestNode_HighLatitudeCoordinates_ShouldApplyLongitudeCorrection()
+        {
+            // Arrange: at 78N (Svalbard), a degree of longitude covers roughly a fifth of what it does at the
+            // equator. A node placed nearby using that correction must still be found as nearest, rather than
+            // the search's ring expansion under- or over-shooting due to an uncorrected longitude cell size.
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(77.0, 10.0, 79.0, 20.0);
+            var factory = new OsmEntityFactory();
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            const double latitude = 78.0;
+            const double queryLongitude = 15.0;
+            double metersPerDegreeLongitudeAt78 = 111_320d * Math.Cos(latitude * Math.PI / 180d);
+
+            var nearNode = factory.CreateNode(1, latitude, queryLongitude + (50d / metersPerDegreeLongitudeAt78));
+            var farNode = factory.CreateNode(2, latitude, queryLongitude + (5000d / metersPerDegreeLongitudeAt78));
+
+            var data = new OsmData(header, bounds, new[] { nearNode, farNode });
+
+            // Act
+            var actual = finder.FindNearestNode(data, latitude, queryLongitude);
+
+            // Assert
+            Assert.IsNotNull(actual);
+            Assert.AreEqual(1L, actual!.Id);
+        }
+
+        [TestMethod()]
+        public void FindNearestNode_ManyNodesAcrossManyGridCells_ShouldMatchIndependentDistanceCheck()
+        {
+            // Arrange: a dense field of nodes spread across an area several grid cells wide/tall, so the
+            // expanding-ring search inevitably has to cross multiple cell boundaries to find the true nearest.
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(59.0, 10.0, 61.0, 12.0);
+            var factory = new OsmEntityFactory();
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            const double queryLatitude = 60.0021;
+            const double queryLongitude = 10.7531;
+
+            var nodes = new List<Node>();
+            long id = 1;
+            for (int latStep = -6; latStep <= 6; latStep++)
+            {
+                for (int lonStep = -6; lonStep <= 6; lonStep++)
+                {
+                    double latitude = 60.0 + latStep * 0.003; // ~333m per step
+                    double longitude = 10.75 + lonStep * 0.006; // ~333m per step at 60N
+                    nodes.Add(factory.CreateNode(id++, latitude, longitude));
+                }
+            }
+
+            var data = new OsmData(header, bounds, nodes);
+
+            var expectedId = nodes
+                .OrderBy(n => IndependentHaversineMeters(queryLatitude, queryLongitude, n.Latitude, n.Longitude))
+                .First()
+                .Id;
+
+            // Act
+            var actual = finder.FindNearestNode(data, queryLatitude, queryLongitude);
+
+            // Assert
+            Assert.IsNotNull(actual);
+            Assert.AreEqual(expectedId, actual!.Id);
+        }
+
+        [TestMethod()]
         public void FindNearByPathDistance_ValidArguments_ShouldReturnExpectedResults()
         {
             // Arrange

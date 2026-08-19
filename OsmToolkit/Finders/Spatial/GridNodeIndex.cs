@@ -19,12 +19,24 @@ namespace OsmToolkit.Finders.Spatial
         private readonly double _latitudeCellSizeDegrees;
         private readonly double _longitudeCellSizeDegrees;
         private readonly Dictionary<(long Row, long Column), List<Node>> _cells;
+        private readonly long _minRow;
+        private readonly long _maxRow;
+        private readonly long _minColumn;
+        private readonly long _maxColumn;
 
         private GridNodeIndex(double latitudeCellSizeDegrees, double longitudeCellSizeDegrees, Dictionary<(long Row, long Column), List<Node>> cells)
         {
             _latitudeCellSizeDegrees = latitudeCellSizeDegrees;
             _longitudeCellSizeDegrees = longitudeCellSizeDegrees;
             _cells = cells;
+
+            if (cells.Count > 0)
+            {
+                _minRow = cells.Keys.Min(key => key.Row);
+                _maxRow = cells.Keys.Max(key => key.Row);
+                _minColumn = cells.Keys.Min(key => key.Column);
+                _maxColumn = cells.Keys.Max(key => key.Column);
+            }
         }
 
         /// <summary>
@@ -96,6 +108,106 @@ namespace OsmToolkit.Finders.Spatial
             }
 
             return results;
+        }
+
+        /// <summary>
+        /// Returns the single indexed <see cref="Node"/> closest to the given coordinate, or <c>null</c> if the
+        /// index has no nodes. Searches grid cells in expanding square rings outward from the query point's own
+        /// cell, stopping once the current best candidate is provably closer than any node an unsearched cell
+        /// could contain - a single cell isn't sufficient, since a node in an adjacent cell can be closer than a
+        /// node in the far corner of the query point's own cell.
+        /// </summary>
+        internal Node? FindNearest(double latitude, double longitude)
+        {
+            if (_cells.Count == 0)
+                return null;
+
+            long row = CellIndex(latitude, _latitudeCellSizeDegrees);
+            long column = CellIndex(longitude, _longitudeCellSizeDegrees);
+
+            long maxRing = Math.Max(
+                Math.Max(Math.Abs(row - _minRow), Math.Abs(row - _maxRow)),
+                Math.Max(Math.Abs(column - _minColumn), Math.Abs(column - _maxColumn)));
+
+            Node? best = null;
+            double bestDistanceMeters = double.PositiveInfinity;
+
+            for (long ring = 0; ring <= maxRing; ring++)
+            {
+                foreach (var cellKey in CellsInRing(row, column, ring))
+                {
+                    if (!_cells.TryGetValue(cellKey, out var bucket))
+                        continue;
+
+                    foreach (var node in bucket)
+                    {
+                        double distance = GeoDistance.HaversineMeters(latitude, longitude, node.Latitude, node.Longitude);
+                        if (distance < bestDistanceMeters)
+                        {
+                            bestDistanceMeters = distance;
+                            best = node;
+                        }
+                    }
+                }
+
+                if (best != null && bestDistanceMeters <= SearchedAreaMarginMeters(latitude, longitude, row, column, ring))
+                    break;
+            }
+
+            return best;
+        }
+
+        /// <summary>
+        /// The minimum possible real-world distance from the query point to any cell not yet covered by the
+        /// square of rings searched so far (rings <c>0..ring</c> around the query point's own cell). Any node in
+        /// an unsearched cell is at least this far away, so a candidate at or under this distance can never be
+        /// beaten by expanding the search further.
+        /// </summary>
+        private double SearchedAreaMarginMeters(double latitude, double longitude, long row, long column, long ring)
+        {
+            double latitudeMin = (row - ring) * _latitudeCellSizeDegrees;
+            double latitudeMax = (row + ring + 1) * _latitudeCellSizeDegrees;
+            double longitudeMin = (column - ring) * _longitudeCellSizeDegrees;
+            double longitudeMax = (column + ring + 1) * _longitudeCellSizeDegrees;
+
+            double latitudeMarginDegrees = Math.Min(latitude - latitudeMin, latitudeMax - latitude);
+            double longitudeMarginDegrees = Math.Min(longitude - longitudeMin, longitudeMax - longitude);
+
+            double latitudeMarginMeters = latitudeMarginDegrees * GeoDistance.MetersPerDegreeLatitude;
+            double longitudeMarginMeters = longitudeMarginDegrees * GeoDistance.MetersPerDegreeLongitude(latitude);
+
+            return Math.Min(latitudeMarginMeters, longitudeMarginMeters);
+        }
+
+        /// <summary>
+        /// Yields the cell coordinates on the border of the square ring at the given distance from
+        /// <paramref name="row"/>/<paramref name="column"/> - just the center cell for ring 0, otherwise the
+        /// outline of the <c>(2*ring+1)</c>-wide square, excluding cells already yielded by smaller rings.
+        /// </summary>
+        private static IEnumerable<(long Row, long Column)> CellsInRing(long row, long column, long ring)
+        {
+            if (ring == 0)
+            {
+                yield return (row, column);
+                yield break;
+            }
+
+            long rowMin = row - ring;
+            long rowMax = row + ring;
+            long columnMin = column - ring;
+            long columnMax = column + ring;
+
+            for (long c = columnMin; c <= columnMax; c++)
+            {
+                yield return (rowMin, c);
+                yield return (rowMax, c);
+            }
+
+            for (long r = rowMin + 1; r <= rowMax - 1; r++)
+            {
+                yield return (r, columnMin);
+                yield return (r, columnMax);
+            }
         }
 
         private static long CellIndex(double value, double cellSizeDegrees) => (long)Math.Floor(value / cellSizeDegrees);
