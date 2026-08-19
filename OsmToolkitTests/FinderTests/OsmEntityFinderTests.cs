@@ -682,6 +682,74 @@ namespace OsmToolkit.FindersTests
         }
 
         [TestMethod()]
+        public void GridNodeIndex_FindNearest_TiedDistanceCandidates_SmallerLimitResultIsPrefixOfLargerLimitResult()
+        {
+            // Arrange: two nodes at the exact same coordinates sit at the exact same Haversine distance from the
+            // query point. FindNearbyNodes's exclusion-filtering retry loop (see OsmEntityFinder.FindNearbyNodesIndexed)
+            // assumes a smaller-limit FindNearest result is always a prefix of a larger-limit one for the same
+            // point - only true if ties are broken deterministically, since List<T>.Sort itself is not stable.
+            const double queryLatitude = 60.0;
+            const double queryLongitude = 10.75;
+            var factory = new OsmEntityFactory();
+
+            var closest = factory.CreateNode(1, queryLatitude, queryLongitude + 0.00005);
+            var tiedLower = factory.CreateNode(2, queryLatitude, queryLongitude + 0.0005);
+            var tiedHigher = factory.CreateNode(3, queryLatitude, queryLongitude + 0.0005); // exact coordinate duplicate of tiedLower
+            var farthest = factory.CreateNode(4, queryLatitude, queryLongitude + 0.005);
+
+            var index = GridNodeIndex.Build(new[] { closest, tiedLower, tiedHigher, farthest });
+
+            // Act
+            var topTwo = index.FindNearest(queryLatitude, queryLongitude, 2);
+            var topThree = index.FindNearest(queryLatitude, queryLongitude, 3);
+
+            // Assert
+            Assert.AreEqual(2, topTwo.Count);
+            Assert.AreEqual(3, topThree.Count);
+            CollectionAssert.AreEqual(topTwo.Select(n => n.Id).ToList(), topThree.Take(2).Select(n => n.Id).ToList());
+            Assert.AreEqual(1L, topTwo[0].Id);
+            Assert.AreEqual(2L, topTwo[1].Id, "The lower-id node should deterministically win an exact distance tie.");
+        }
+
+        [TestMethod()]
+        public void FindNearbyNodes_TiedDistanceCandidateExcludedBySameWay_DoublingRetryStillFindsNextEligibleNode()
+        {
+            // Arrange: B and C are tied at the exact same distance (identical coordinates). B shares a Way with
+            // the closest node A, so gets excluded once A is in the result set - forcing the exclusion-filtering
+            // retry loop to grow its requested candidate count and re-query the grid index. Before the tie was
+            // broken deterministically (see GridNodeIndex.CompareByDistanceThenId), that regrow could resume
+            // scanning at the wrong position if B and C swapped order between the smaller and larger index query,
+            // silently skipping C - the one eligible node at that distance.
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(59.0, 10.0, 61.0, 12.0);
+            var user = new User(1, "JaneDoe");
+            var factory = new OsmEntityFactory();
+
+            const double queryLatitude = 60.0;
+            const double queryLongitude = 10.75;
+
+            var nodeA = factory.CreateNode(1, queryLatitude, queryLongitude + 0.00005);
+            var nodeB = factory.CreateNode(2, queryLatitude, queryLongitude + 0.0005);
+            var nodeC = factory.CreateNode(3, queryLatitude, queryLongitude + 0.0005); // exact coordinate duplicate of nodeB
+            var nodeD = factory.CreateNode(4, queryLatitude, queryLongitude + 0.005);
+
+            var way = factory.CreateWay(101, new List<long> { nodeA.Id, nodeB.Id });
+
+            var data = new OsmData(header, bounds, new[] { nodeA, nodeB, nodeC, nodeD }, new[] { way });
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            // Act
+            var actual = finder.FindNearbyNodes(data, queryLatitude, queryLongitude, 2, null, false, true);
+
+            // Assert
+            Assert.AreEqual(2, actual.Count);
+            Assert.IsTrue(actual.Any(n => n.Id == 1L));
+            Assert.IsTrue(actual.Any(n => n.Id == 3L));
+            Assert.IsFalse(actual.Any(n => n.Id == 2L), "Node B should be excluded for sharing a Way with node A.");
+            Assert.IsFalse(actual.Any(n => n.Id == 4L), "Node D is farther than the tied pair and shouldn't be needed to satisfy limit 2.");
+        }
+
+        [TestMethod()]
         public void FindNearByPathDistance_ValidArguments_ShouldReturnExpectedResults()
         {
             // Arrange

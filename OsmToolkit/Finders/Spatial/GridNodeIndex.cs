@@ -191,13 +191,13 @@ namespace OsmToolkit.Finders.Spatial
 
                 if (candidates.Count >= limit)
                 {
-                    candidates.Sort((a, b) => a.DistanceMeters.CompareTo(b.DistanceMeters));
+                    candidates.Sort(CompareByDistanceThenId);
                     if (candidates[limit - 1].DistanceMeters <= SearchedAreaMarginMeters(latitude, longitude, row, column, ring))
                         break;
                 }
             }
 
-            candidates.Sort((a, b) => a.DistanceMeters.CompareTo(b.DistanceMeters));
+            candidates.Sort(CompareByDistanceThenId);
             return candidates.Take(limit).Select(c => c.Node).ToList();
         }
 
@@ -255,5 +255,19 @@ namespace OsmToolkit.Finders.Spatial
         }
 
         private static long CellIndex(double value, double cellSizeDegrees) => (long)Math.Floor(value / cellSizeDegrees);
+
+        /// <summary>
+        /// Orders candidates by distance, breaking exact ties by <see cref="OsmEntity.Id"/>. <see cref="List{T}.Sort()"/>
+        /// is not stable, so without a deterministic tiebreaker, two <see cref="FindNearest(double, double, int)"/>
+        /// calls for the same point but different <c>limit</c> values could order tied-distance nodes differently -
+        /// breaking <see cref="OsmEntityFinder"/>'s assumption that a smaller-limit result is always a prefix of a
+        /// larger-limit one, which its exclusion-filtering retry loop relies on when it grows <c>limit</c> and resumes
+        /// scanning partway through the previous result instead of re-filtering from the start.
+        /// </summary>
+        private static int CompareByDistanceThenId((Node Node, double DistanceMeters) a, (Node Node, double DistanceMeters) b)
+        {
+            int distanceComparison = a.DistanceMeters.CompareTo(b.DistanceMeters);
+            return distanceComparison != 0 ? distanceComparison : a.Node.Id.CompareTo(b.Node.Id);
+        }
     }
 }
