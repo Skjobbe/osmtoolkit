@@ -44,24 +44,30 @@ namespace OsmToolkit.Serialization.Json.Dto
                 dto.Generator,
                 null,
                 null,
-                null);            
+                null);
 
-            var nodes = dto.Elements?
-                .Where(e => e.Type == "node")
-                .Select(e => new Node(e.Id, e.Lat!.Value, e.Lon!.Value, e.Tags ?? new()))
-                .ToList();
+            var nodes = new List<Node>();
+            var ways = new List<Way>();
+            var relations = new List<Relation>();
 
-            var ways = dto.Elements?
-                .Where(e => e.Type == "way")
-                .Select(e => new Way(e.Id, e.Nodes ?? new(), e.Tags ?? new()))
-                .ToList();
-
-            var relations = dto.Elements?
-                .Where(e => e.Type == "relation")
-                .Select(e => new Relation(e.Id, e.Members!.Select(m => m.ToDomain()).ToList(), e.Tags ?? new()))
-                .ToList();
+            foreach (var element in dto.Elements ?? new())
+            {
+                switch (element.ToDomain())
+                {
+                    case Node node:
+                        nodes.Add(node);
+                        break;
+                    case Way way:
+                        ways.Add(way);
+                        break;
+                    case Relation relation:
+                        relations.Add(relation);
+                        break;
+                }
+            }
 
             return new OsmData(header, null, nodes, ways, relations);
-        }        
+        }
+
     }
 }

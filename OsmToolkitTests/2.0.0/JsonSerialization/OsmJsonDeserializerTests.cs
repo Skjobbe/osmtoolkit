@@ -895,6 +895,129 @@ namespace OsmToolkitTests._2._0._0.OsmJsonDeserializerTests
 
         }
 
+        [TestMethod]
+        public async Task DeserializeAsync_WhenOverpassNodeIsMissingLat_ShouldThrowArgumentNullException()
+        {
+            // Arrange
+            var overpassJson = """
+            {
+              "version": 0.6,
+              "generator": "TestGenerator",
+              "elements": [
+                {
+                  "type": "node",
+                  "id": 1,
+                  "lon": 10.75,
+                  "tags": { "name": "Node A" }
+                }
+              ]
+            }
+            """;
+
+            OsmJsonDeserializer deserializer = new();
+
+            // Act && Assert
+            await Assert.ThrowsExceptionAsync<ArgumentNullException>(async () => await deserializer.DeserializeAsync(overpassJson));
+        }
+
+        [TestMethod]
+        public async Task DeserializeAsync_WhenOverpassNodeIsMissingLon_ShouldThrowArgumentNullException()
+        {
+            // Arrange
+            var overpassJson = """
+            {
+              "version": 0.6,
+              "generator": "TestGenerator",
+              "elements": [
+                {
+                  "type": "node",
+                  "id": 1,
+                  "lat": 59.91,
+                  "tags": { "name": "Node A" }
+                }
+              ]
+            }
+            """;
+
+            OsmJsonDeserializer deserializer = new();
+
+            // Act && Assert
+            await Assert.ThrowsExceptionAsync<ArgumentNullException>(async () => await deserializer.DeserializeAsync(overpassJson));
+        }
+
+        [TestMethod]
+        public async Task DeserializeAsync_WhenOverpassRelationIsMissingMembers_ShouldThrowArgumentNullException()
+        {
+            // Arrange
+            var overpassJson = """
+            {
+              "version": 0.6,
+              "generator": "TestGenerator",
+              "elements": [
+                {
+                  "type": "relation",
+                  "id": 1000,
+                  "tags": { "type": "multipolygon" }
+                }
+              ]
+            }
+            """;
+
+            OsmJsonDeserializer deserializer = new();
+
+            // Act && Assert
+            await Assert.ThrowsExceptionAsync<ArgumentNullException>(async () => await deserializer.DeserializeAsync(overpassJson));
+        }
+
+        [TestMethod]
+        public async Task DeserializeAsync_WhenOverpassWayHasFewerThanTwoNodes_ShouldThrowArgumentOutOfRangeException()
+        {
+            // Arrange
+            var overpassJson = """
+            {
+              "version": 0.6,
+              "generator": "TestGenerator",
+              "elements": [
+                {
+                  "type": "way",
+                  "id": 100,
+                  "nodes": [1],
+                  "tags": { "highway": "residential" }
+                }
+              ]
+            }
+            """;
+
+            OsmJsonDeserializer deserializer = new();
+
+            // Act && Assert
+            await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(async () => await deserializer.DeserializeAsync(overpassJson));
+        }
+
+        [TestMethod]
+        public async Task DeserializeAsync_WhenOverpassElementHasUnknownType_ShouldThrowArgumentOutOfRangeException()
+        {
+            // Arrange
+            var overpassJson = """
+            {
+              "version": 0.6,
+              "generator": "TestGenerator",
+              "elements": [
+                {
+                  "type": "area",
+                  "id": 1,
+                  "tags": { "name": "Not a real OSM element type" }
+                }
+              ]
+            }
+            """;
+
+            OsmJsonDeserializer deserializer = new();
+
+            // Act && Assert
+            await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(async () => await deserializer.DeserializeAsync(overpassJson));
+        }
+
 
         // DeserializeFromFileAsync
         [TestMethod]

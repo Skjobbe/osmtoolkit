@@ -1,0 +1,21 @@
+# 006 — Fail fast on malformed or unrecognized Overpass elements
+
+## Context
+`OsmDataDto.FromOverpassJson` used null-forgiving operators (`e.Lat!.Value`, `e.Members!`) when mapping Overpass JSON elements to domain types, throwing an undocumented `NullReferenceException`/`InvalidOperationException` if a node lacked coordinates or a relation lacked members — instead of a clear, documented exception, violating CLAUDE.md's "fail fast with standard .NET exceptions" rule. The same method also silently dropped any element whose `type` wasn't `"node"`/`"way"`/`"relation"`, via three separate `.Where()` filters — a different failure mode (silent data loss) with the same root cause: a shape assumption about Overpass's response that isn't actually guaranteed. Tracked as issue #7, surfaced while designing `IOsmDataSource` (#1).
+
+A primary consumer of this library is an AI agent. It can catch and act on a thrown exception, but it cannot detect that a Node, Way, or Relation silently vanished from the parsed result because one of its required fields was missing.
+
+## Decision
+`FromOverpassJson` now fails fast and explicitly on every element it cannot safely convert: a node without `lat`/`lon`, a relation without `members`, a way without at least two `nodes`, and an element with an unrecognized or blank `type`. All four are treated as the same category of bug and fixed together in the same pass, rather than leaving some as documented failures next to others still failing silently.
+
+Validation was extracted onto `OsmJsonElementDto` as a single `ToDomain() : OsmEntity` method that switches on `Type` internally — mirroring the one-`ToDomain()`-per-class shape already used by `NodeDto`/`WayDto`/`RelationDto` for the file-based path, rather than introducing a different shape (e.g. three separate `ToNode()`/`ToWay()`/`ToRelation()` methods) just for this one DTO. The unrecognized-`type` case is this method's own default-case throw, so the mapping from `type` string to domain type lives in exactly one place. `FromOverpassJson` itself no longer inspects `Type` at all — it calls `ToDomain()` unconditionally and buckets the result into `Nodes`/`Ways`/`Relations` by pattern-matching on the returned object's actual C# type.
+
+All new failures throw standard BCL exceptions (`ArgumentNullException` for a missing field, `ArgumentOutOfRangeException` for a present-but-invalid one), matching the sibling DTOs' existing convention, with the OSM element id and the missing/invalid field folded into the message — a response can carry thousands of elements, and a generic "malformed element" message gives no way to locate the bad one.
+
+## Alternatives considered
+- **Skip malformed elements and return a partial result (optionally logging a warning)**: rejected. The stated consumer (an agent) can act on a thrown exception but has no way to notice that data quietly went missing from the result — e.g. a Way silently referencing a Node that got dropped. This would also require `FromOverpassJson` to become logger-aware, which it isn't today.
+- **A new custom exception type carrying structured `ElementId`/`ElementType`/`Reason` properties**: rejected. Every consumer handles any of these failures identically (log, report, give up) — there's no behavior to branch on, only information for a human debugging a specific response. The choice is also asymmetric: adding a custom exception later, if a real need for structured branching appears, is backward compatible; a new public type in a published package can never be removed again once shipped.
+- **Fixing only the two cases named in issue #7 (node coordinates, relation members) and leaving the unrecognized-`type` silent drop for a separate issue**: rejected once the fail-fast rationale was settled — silent data loss is exactly the failure mode fail-fast was chosen to eliminate, so leaving one of the three holes open would mean not actually following through on the decision.
+
+## Consequences
+An Overpass response with even one field-incomplete or unrecognized-type element now fails the entire parse, rather than returning a best-effort partial `OsmData`. This is deliberate: it trades availability of partial data for a caller's ability to actually detect that its input was malformed at all.
