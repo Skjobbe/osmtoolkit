@@ -158,6 +158,50 @@ namespace OsmToolkit.Finders.Spatial
         }
 
         /// <summary>
+        /// Returns the <paramref name="limit"/> indexed <see cref="Node"/> instances closest to the given
+        /// coordinate, nearest first. Returns fewer than <paramref name="limit"/> if the index has fewer nodes.
+        /// Searches grid cells in expanding square rings outward from the query point's own cell, stopping once
+        /// the current <paramref name="limit"/>-th best candidate is provably closer than any node an unsearched
+        /// cell could contain - the same guarantee <see cref="FindNearest(double, double)"/> uses for a single
+        /// nearest node, generalized to the Nth-nearest.
+        /// </summary>
+        internal List<Node> FindNearest(double latitude, double longitude, int limit)
+        {
+            var candidates = new List<(Node Node, double DistanceMeters)>();
+            if (_cells.Count == 0 || limit <= 0)
+                return new List<Node>();
+
+            long row = CellIndex(latitude, _latitudeCellSizeDegrees);
+            long column = CellIndex(longitude, _longitudeCellSizeDegrees);
+
+            long maxRing = Math.Max(
+                Math.Max(Math.Abs(row - _minRow), Math.Abs(row - _maxRow)),
+                Math.Max(Math.Abs(column - _minColumn), Math.Abs(column - _maxColumn)));
+
+            for (long ring = 0; ring <= maxRing; ring++)
+            {
+                foreach (var cellKey in CellsInRing(row, column, ring))
+                {
+                    if (!_cells.TryGetValue(cellKey, out var bucket))
+                        continue;
+
+                    foreach (var node in bucket)
+                        candidates.Add((node, GeoDistance.HaversineMeters(latitude, longitude, node.Latitude, node.Longitude)));
+                }
+
+                if (candidates.Count >= limit)
+                {
+                    candidates.Sort((a, b) => a.DistanceMeters.CompareTo(b.DistanceMeters));
+                    if (candidates[limit - 1].DistanceMeters <= SearchedAreaMarginMeters(latitude, longitude, row, column, ring))
+                        break;
+                }
+            }
+
+            candidates.Sort((a, b) => a.DistanceMeters.CompareTo(b.DistanceMeters));
+            return candidates.Take(limit).Select(c => c.Node).ToList();
+        }
+
+        /// <summary>
         /// The minimum possible real-world distance from the query point to any cell not yet covered by the
         /// square of rings searched so far (rings <c>0..ring</c> around the query point's own cell). Any node in
         /// an unsearched cell is at least this far away, so a candidate at or under this distance can never be

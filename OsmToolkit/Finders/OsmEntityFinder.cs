@@ -377,12 +377,31 @@ namespace OsmToolkit.Finders
             if (limit <= 0)
                 throw new ArgumentOutOfRangeException(nameof(limit), "Limit cannot be lower or equal to zero.");
 
+            List<Node> resultNodes;
+
             if (tags != null)
             {
-                data = FindByTags(data, tags);
-                FinderLogMessages.LogTagFilterResults(_logger, tags.ToTagString(), data.Nodes.Count);
+                OsmData filteredData = FindByTags(data, tags);
+                FinderLogMessages.LogTagFilterResults(_logger, tags.ToTagString(), filteredData.Nodes.Count);
+
+                resultNodes = FindNearbyNodesLinear(filteredData, latitude, longitude, limit, allowSameWay, allowSameRelation);
+            }
+            else
+            {
+                resultNodes = FindNearbyNodesIndexed(data, latitude, longitude, limit, allowSameWay, allowSameRelation);
             }
 
+            string result = string.Join(", ", resultNodes.Select(n => $"{n.Id}: ({n.Latitude}, {n.Longitude})"));
+            FinderLogMessages.LogFindNearbyNodesResult(_logger, resultNodes.Count, latitude, longitude, result);
+            return resultNodes;
+        }
+
+        /// <summary>
+        /// Linear-scan implementation used by tag-filtered <see cref="FindNearbyNodes(OsmData, double, double, int, Dictionary{string, string}?, bool, bool)"/>
+        /// calls, which search a freshly filtered, single-use <see cref="OsmData"/> that the grid index cache never reuses.
+        /// </summary>
+        private List<Node> FindNearbyNodesLinear(OsmData data, double latitude, double longitude, int limit, bool allowSameWay, bool allowSameRelation)
+        {
             HashSet<Node> resultNodes = new HashSet<Node>(limit);
 
             List<(Node node, double distance)> distanceSortedNodes = new();
@@ -400,7 +419,7 @@ namespace OsmToolkit.Finders
             {
                 if (resultNodes.Count >= limit)
                     break;
-                
+
                 var queryNode = distanceSortedNodes[i].node;
                 if ((allowSameWay && allowSameRelation) || !IsInSameWayOrRelation(queryNode, resultNodes, data, allowSameWay, allowSameRelation))
                 {
@@ -408,8 +427,44 @@ namespace OsmToolkit.Finders
                 }
             }
 
-            string result = string.Join(", ", resultNodes.Select(n => $"{n.Id}: ({n.Latitude}, {n.Longitude})"));
-            FinderLogMessages.LogFindNearbyNodesResult(_logger, resultNodes.Count, latitude, longitude, result);
+            return resultNodes.ToList();
+        }
+
+        /// <summary>
+        /// Grid-index-backed implementation used by untagged <see cref="FindNearbyNodes(OsmData, double, double, int, Dictionary{string, string}?, bool, bool)"/>
+        /// calls. Requests the nearest-N nodes from the grid index, applying the same same-Way/same-Relation
+        /// exclusion filtering the linear-scan path uses. Since exclusion can skip nodes, the requested candidate
+        /// count is doubled and re-queried whenever filtering hasn't yet produced <paramref name="limit"/> results
+        /// and the index still has unretrieved, farther nodes left to offer - matching the linear scan's behavior
+        /// of considering the whole dataset if needed, while only paying for it when exclusions actually occur.
+        /// </summary>
+        private List<Node> FindNearbyNodesIndexed(OsmData data, double latitude, double longitude, int limit, bool allowSameWay, bool allowSameRelation)
+        {
+            HashSet<Node> resultNodes = new HashSet<Node>(limit);
+
+            int totalNodes = data.Nodes.Count;
+            int requestedLimit = limit;
+            List<Node> candidates = GetGridIndex(data).FindNearest(latitude, longitude, requestedLimit);
+            int consumed = 0;
+
+            while (true)
+            {
+                for (; consumed < candidates.Count && resultNodes.Count < limit; consumed++)
+                {
+                    var queryNode = candidates[consumed];
+                    if ((allowSameWay && allowSameRelation) || !IsInSameWayOrRelation(queryNode, resultNodes, data, allowSameWay, allowSameRelation))
+                    {
+                        resultNodes.Add(queryNode);
+                    }
+                }
+
+                if (resultNodes.Count >= limit || candidates.Count >= totalNodes)
+                    break;
+
+                requestedLimit = Math.Min(requestedLimit * 2, totalNodes);
+                candidates = GetGridIndex(data).FindNearest(latitude, longitude, requestedLimit);
+            }
+
             return resultNodes.ToList();
         }
 
