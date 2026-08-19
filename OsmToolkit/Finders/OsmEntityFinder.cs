@@ -2,7 +2,9 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using OsmToolkit.Extensions;
 using OsmToolkit.Finders.Logging;
+using OsmToolkit.Finders.Spatial;
 using OsmToolkit.Models.Logging;
+using System.Runtime.CompilerServices;
 
 namespace OsmToolkit.Finders
 {
@@ -13,6 +15,15 @@ namespace OsmToolkit.Finders
     internal class OsmEntityFinder : IOsmFinder<OsmEntity>, IOsmFinderV2<OsmEntity>, IOsmValueFinder<OsmEntity>, INearestNodesFinder, IWithinDistanceFinder<OsmEntity>, IShortestPathFinder
 #pragma warning restore CS0618
     {
+        /// <summary>
+        /// Grid-based spatial indexes over each <see cref="OsmData"/> instance's nodes, keyed by instance identity
+        /// so the index built for a caller's first proximity-search call is reused by later calls against the same
+        /// instance, even though <see cref="OsmEntityFinder"/> itself is registered Transient and holds no state
+        /// between calls. Mirrors the <see cref="ConditionalWeakTable{TKey,TValue}"/> pattern established in ADR-004
+        /// for coalescing in-flight Overpass fetches.
+        /// </summary>
+        private static readonly ConditionalWeakTable<OsmData, GridNodeIndex> GridIndexByData = new();
+
         private readonly ILogger<OsmEntityFinder> _logger;
 
         /// <summary>
@@ -441,13 +452,7 @@ namespace OsmToolkit.Finders
             if (data == null)
                 throw new ArgumentNullException(nameof(data), "Data cannot be null, must be defined.");
 
-            HashSet<Node> resultNodes = new HashSet<Node>();
-
-            foreach (Node node in data.Nodes)
-            {
-                if (CalculateCoordinatesToMeters(latitude, longitude, node.Latitude, node.Longitude) <= radiusMeters)
-                    resultNodes.Add(node);
-            }
+            HashSet<Node> resultNodes = new HashSet<Node>(GetGridIndex(data).FindWithinRadius(latitude, longitude, radiusMeters));
 
             var (waysInRange, relationsInRange) = GatherNodeRelatedEntities(data, resultNodes);
 
@@ -623,24 +628,15 @@ namespace OsmToolkit.Finders
         }
 
         private static double CalculateCoordinatesToMeters(double latitudeFrom, double longitudeFrom, double latitudeTo, double longitudeTo)
-        {
-            const double EARTH_RADIUS = 6371000;
+            => GeoDistance.HaversineMeters(latitudeFrom, longitudeFrom, latitudeTo, longitudeTo);
 
-            // Degrees to radians
-            double latitudeRadiansFrom = latitudeFrom * Math.PI / 180;
-            double latitudeRadiansTo = latitudeTo * Math.PI / 180;
-            double latitudeDifference = (latitudeTo - latitudeFrom) * Math.PI / 180;
-            double longitudeDifference = (longitudeTo - longitudeFrom) * Math.PI / 180;
+        /// <summary>
+        /// Returns the grid-based spatial index over <paramref name="data"/>'s nodes, building it lazily on first
+        /// use and reusing it for every later call against the same <see cref="OsmData"/> instance.
+        /// </summary>
+        private static GridNodeIndex GetGridIndex(OsmData data)
+            => GridIndexByData.GetValue(data, static d => GridNodeIndex.Build(d.Nodes));
 
-            // Haversine formula
-            double a = Math.Sin(latitudeDifference / 2) * Math.Sin(latitudeDifference / 2) +
-                       Math.Cos(latitudeRadiansFrom) * Math.Cos(latitudeRadiansTo) *
-                       Math.Sin(longitudeDifference / 2) * Math.Sin(longitudeDifference / 2);
-            double c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
-
-            double distance = EARTH_RADIUS * c;
-            return distance;
-        }
         private bool IsInSameWayOrRelation(Node queryNode, IEnumerable<Node> resultNodes, OsmData data, bool allowSameWay, bool allowSameRelation)
         {
             foreach (Node resultNode in resultNodes)

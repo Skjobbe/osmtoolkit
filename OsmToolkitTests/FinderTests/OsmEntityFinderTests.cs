@@ -1,5 +1,6 @@
 ﻿using OsmToolkit.Factories;
 using OsmToolkit.Finders;
+using OsmToolkit.Finders.Spatial;
 
 namespace OsmToolkit.FindersTests
 {
@@ -278,6 +279,180 @@ namespace OsmToolkit.FindersTests
 
             // Assert
             Assert.ThrowsException<ArgumentNullException>(actual);
+        }
+
+        [TestMethod()]
+        public void FindNearByRadius_NodeNearGridCellCorner_ShouldStillBeIncluded()
+        {
+            // Arrange: a single-node dataset makes the node's own latitude the grid's reference latitude,
+            // so the cell boundaries can be computed exactly instead of approximated.
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(59.0, 10.0, 61.0, 12.0);
+            var factory = new OsmEntityFactory();
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            const double desiredLatitude = 10.75;
+            double latitudeCellSizeDegrees = GridNodeIndex.DefaultCellSizeMeters / GeoDistance.MetersPerDegreeLatitude;
+            double longitudeCellSizeDegrees = GridNodeIndex.DefaultCellSizeMeters / GeoDistance.MetersPerDegreeLongitude(60.0);
+
+            long rowIndex = (long)Math.Round(60.0 / latitudeCellSizeDegrees);
+            long columnIndex = (long)Math.Round(desiredLatitude / longitudeCellSizeDegrees);
+
+            // Query sits (up to floating-point rounding) exactly on a row/column cell boundary; the node sits a
+            // few meters away, just across that boundary into the diagonally-neighboring cell (a corner case,
+            // not just a single edge).
+            double queryLatitude = rowIndex * latitudeCellSizeDegrees;
+            double queryLongitude = columnIndex * longitudeCellSizeDegrees;
+            double nodeLatitude = queryLatitude - (5d / GeoDistance.MetersPerDegreeLatitude);
+            double nodeLongitude = queryLongitude - (5d / GeoDistance.MetersPerDegreeLongitude(queryLatitude));
+
+            var node = factory.CreateNode(1, nodeLatitude, nodeLongitude);
+            var data = new OsmData(header, bounds, new[] { node });
+
+            // Act
+            var results = finder.FindNearByRadius(data, queryLatitude, queryLongitude, 50);
+
+            // Assert
+            Assert.IsTrue(results.Nodes.Any(n => n.Id == 1L));
+        }
+
+        [TestMethod()]
+        public void FindNearByRadius_SingleNodeDataset_ShouldReturnNodeWhenWithinRadius()
+        {
+            // Arrange
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(40.0, -76.0, 42.0, -73.0);
+            var factory = new OsmEntityFactory();
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            var node = factory.CreateNode(1, 40.7128, -74.0060);
+            var data = new OsmData(header, bounds, new[] { node });
+
+            // Act
+            var results = finder.FindNearByRadius(data, 40.7128, -74.0061, 50);
+
+            // Assert
+            Assert.IsTrue(results.Nodes.Any(n => n.Id == 1L));
+        }
+
+        [TestMethod()]
+        public void FindNearByRadius_SingleNodeDataset_ShouldReturnEmptyWhenOutsideRadius()
+        {
+            // Arrange
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(40.0, -76.0, 42.0, -73.0);
+            var factory = new OsmEntityFactory();
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            var node = factory.CreateNode(1, 41.0, -75.0);
+            var data = new OsmData(header, bounds, new[] { node });
+
+            // Act
+            var results = finder.FindNearByRadius(data, 40.7128, -74.0060, 50);
+
+            // Assert
+            Assert.AreEqual(0, results.Nodes.Count);
+        }
+
+        [TestMethod()]
+        public void FindNearByRadius_QueryPointWithNothingInRange_ShouldReturnEmptyResults()
+        {
+            // Arrange
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            // Act: fixture's nodes all sit around (40.7N, -74.0W); this query point is nowhere near them.
+            var results = finder.FindNearByRadius(_osmData!, 0.0, 0.0, 100);
+
+            List<OsmEntity> entities = new List<OsmEntity>();
+            entities.AddRange(results.Nodes);
+            entities.AddRange(results.Ways);
+            entities.AddRange(results.Relations);
+
+            // Assert
+            Assert.AreEqual(0, entities.Count);
+        }
+
+        [TestMethod()]
+        public void FindNearByRadius_HighLatitudeCoordinates_ShouldApplyLongitudeCorrection()
+        {
+            // Arrange: at 78N (Svalbard), a degree of longitude covers roughly a fifth of what it does at the
+            // equator. A node placed ~3000m east (using that correction) must still be found within a ~3100m
+            // radius - without the correction, the query would scan far too narrow a longitude band and miss it.
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(77.0, 10.0, 79.0, 20.0);
+            var factory = new OsmEntityFactory();
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            const double latitude = 78.0;
+            const double queryLongitude = 15.0;
+            double metersPerDegreeLongitudeAt78 = 111_320d * Math.Cos(latitude * Math.PI / 180d);
+            double nodeLongitude = queryLongitude + (3000d / metersPerDegreeLongitudeAt78);
+
+            var node = factory.CreateNode(1, latitude, nodeLongitude);
+            var data = new OsmData(header, bounds, new[] { node });
+
+            // Act
+            var results = finder.FindNearByRadius(data, latitude, queryLongitude, 3100);
+
+            // Assert
+            Assert.IsTrue(results.Nodes.Any(n => n.Id == 1L));
+        }
+
+        [TestMethod()]
+        public void FindNearByRadius_RadiusSpanningManyGridCells_ShouldMatchIndependentDistanceCheck()
+        {
+            // Arrange: a dense field of nodes spread across an area several grid cells wide/tall in each
+            // direction, so the expected/actual comparison below inevitably exercises nodes sitting close to
+            // cell boundaries as well as nodes several cells away from the query point.
+            var header = new OsmHeader(0.6, "UnitTestGen", "OSM Testers", "https://osm.test/copyright", "https://osm.test/license");
+            var bounds = new OsmCoordinateBounds(59.0, 10.0, 61.0, 12.0);
+            var factory = new OsmEntityFactory();
+            OsmEntityFinder finder = new OsmEntityFinder();
+
+            const double queryLatitude = 60.0;
+            const double queryLongitude = 10.75;
+            const double radiusMeters = 1800;
+
+            var nodes = new List<Node>();
+            long id = 1;
+            for (int latStep = -6; latStep <= 6; latStep++)
+            {
+                for (int lonStep = -6; lonStep <= 6; lonStep++)
+                {
+                    double latitude = queryLatitude + latStep * 0.003; // ~333m per step
+                    double longitude = queryLongitude + lonStep * 0.006; // ~333m per step at 60N
+                    nodes.Add(factory.CreateNode(id++, latitude, longitude));
+                }
+            }
+
+            var data = new OsmData(header, bounds, nodes);
+
+            var expectedIds = nodes
+                .Where(n => IndependentHaversineMeters(queryLatitude, queryLongitude, n.Latitude, n.Longitude) <= radiusMeters)
+                .Select(n => n.Id)
+                .ToHashSet();
+
+            // Act
+            var results = finder.FindNearByRadius(data, queryLatitude, queryLongitude, radiusMeters);
+            var actualIds = results.Nodes.Select(n => n.Id).ToHashSet();
+
+            // Assert
+            Assert.IsTrue(expectedIds.Count > 0, "Test setup should produce at least one expected match.");
+            CollectionAssert.AreEquivalent(expectedIds.ToList(), actualIds.ToList());
+        }
+
+        private static double IndependentHaversineMeters(double latitudeFrom, double longitudeFrom, double latitudeTo, double longitudeTo)
+        {
+            const double earthRadiusMeters = 6371000d;
+            double DegreesToRadians(double degrees) => degrees * Math.PI / 180d;
+
+            double dLat = DegreesToRadians(latitudeTo - latitudeFrom);
+            double dLon = DegreesToRadians(longitudeTo - longitudeFrom);
+            double a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                       Math.Cos(DegreesToRadians(latitudeFrom)) * Math.Cos(DegreesToRadians(latitudeTo)) *
+                       Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+            double c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+            return earthRadiusMeters * c;
         }
 
         [TestMethod()]
