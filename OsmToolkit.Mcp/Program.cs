@@ -15,10 +15,12 @@ builder.Logging.AddConsole(options =>
 
 builder.Services.AddOsmToolkit();
 builder.Services.AddTransient<SearchByTagsInAreaHandler>();
+builder.Services.AddTransient<FindNearPointHandler>();
 
 builder.Services
     .AddMcpServer()
     .WithStdioServerTransport()
-    .WithTools<SearchByTagsInAreaTool>();
+    .WithTools<SearchByTagsInAreaTool>()
+    .WithTools<FindNearPointTool>();
 
 await builder.Build().RunAsync();
