@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using OsmToolkit.DataSources;
 using OsmToolkit.Finders;
+using OsmToolkit.Geocoding;
 using OsmToolkit.Serialization.Json;
 using OsmToolkit.Serialization.Xml;
 
@@ -34,6 +35,7 @@ namespace OsmToolkit
             services.TryAddTransient<IShortestPathFinder, OsmEntityFinder>();
             services.AddMemoryCache(options => options.SizeLimit = OverpassOsmDataSource.DefaultCacheSizeLimit);
             services.TryAddTransient<IOsmDataSource, OverpassOsmDataSource>();
+            services.TryAddTransient<IPlaceLookup, NominatimPlaceLookup>();
 
             return services;
         }
