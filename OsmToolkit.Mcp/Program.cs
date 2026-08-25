@@ -16,11 +16,13 @@ builder.Logging.AddConsole(options =>
 builder.Services.AddOsmToolkit();
 builder.Services.AddTransient<SearchByTagsInAreaHandler>();
 builder.Services.AddTransient<FindNearPointHandler>();
+builder.Services.AddTransient<RouteBetweenPointsHandler>();
 
 builder.Services
     .AddMcpServer()
     .WithStdioServerTransport()
     .WithTools<SearchByTagsInAreaTool>()
-    .WithTools<FindNearPointTool>();
+    .WithTools<FindNearPointTool>()
+    .WithTools<RouteBetweenPointsTool>();
 
 await builder.Build().RunAsync();
