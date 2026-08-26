@@ -51,6 +51,7 @@ namespace OsmToolkit.Mcp.Tools
         /// <returns>The matching entities, with their tags and resolved coordinates.</returns>
         /// <exception cref="ArgumentException">Thrown when <paramref name="place"/> is null or empty, or <paramref name="tags"/> is null or empty.</exception>
         /// <exception cref="PlaceNotFoundException">Thrown when no place matches <paramref name="place"/>.</exception>
+        /// <exception cref="OsmDataUnavailableException">Thrown when OSM data for the search area could not be fetched.</exception>
         public async Task<IReadOnlyList<TagSearchMatch>> SearchAsync(string place, IReadOnlyDictionary<string, string?> tags, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(place))
@@ -62,7 +63,7 @@ namespace OsmToolkit.Mcp.Tools
             SearchByTagsInAreaLogMessages.LogSearchStart(_logger, place, tags.Count);
 
             var location = await _placeLookup.FindAsync(place, cancellationToken);
-            var data = await _dataSource.GetOsmDataAsync(location.Bounds, cancellationToken);
+            var data = await OsmDataFetcher.FetchAsync(_dataSource, location.Bounds, cancellationToken);
 
             var tagFilter = tags.ToDictionary(kv => kv.Key, kv => kv.Value ?? string.Empty);
             var filtered = _valueFinder.FindByTags(data, tagFilter);

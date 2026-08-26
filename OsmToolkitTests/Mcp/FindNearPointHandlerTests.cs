@@ -211,5 +211,21 @@ namespace OsmToolkit.Tests.Mcp
                 () => sut.FindAsync("Nonexistentplacexyz", radiusMeters: 1000, tags: null, limit: 10));
             Assert.AreEqual("Nonexistentplacexyz", exception.PlaceName);
         }
+
+        [TestMethod]
+        public async Task FindAsync_WhenOverpassFailsWithServerError_ThrowsOsmDataUnavailableException()
+        {
+            // Arrange - maxRetryAttempts: 0 keeps the test from paying for #29's retry delay; the wrapping
+            // behavior being tested here doesn't depend on whether retry was exhausted or skipped.
+            var placeLookup = new NominatimPlaceLookup(new HttpClient(new FakeHttpMessageHandler(HttpStatusCode.OK, ValidNominatimJson)));
+            var dataSource = new OverpassOsmDataSource(new HttpClient(new FakeHttpMessageHandler(HttpStatusCode.ServiceUnavailable, "")), maxRetryAttempts: 0);
+            var finder = new OsmEntityFinder();
+            var sut = new FindNearPointHandler(placeLookup, dataSource, finder, finder);
+
+            // Act & Assert
+            var exception = await Assert.ThrowsExceptionAsync<OsmDataUnavailableException>(
+                () => sut.FindAsync("Fredrikstad", radiusMeters: 1000, tags: null, limit: 10));
+            Assert.IsInstanceOfType(exception.InnerException, typeof(HttpRequestException));
+        }
     }
 }

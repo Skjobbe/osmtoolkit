@@ -384,5 +384,24 @@ namespace OsmToolkit.Tests.Mcp
             await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(
                 () => sut.RouteAsync("Origin", "Destination", "car", avoidMotorway: false));
         }
+
+        [TestMethod]
+        public async Task RouteAsync_WhenOverpassResponseIsUnparseable_ThrowsOsmDataUnavailableException()
+        {
+            // Arrange - a malformed response body isn't retried by #29 (the same failure would just
+            // recur), so this exercises the wrapping without needing maxRetryAttempts: 0.
+            var placeLookup = new NominatimPlaceLookup(new HttpClient(new PlaceLookupFakeHttpMessageHandler(new Dictionary<string, string>
+            {
+                ["Origin"] = OriginNominatimJson,
+                ["Destination"] = DestinationNominatimJson,
+            })));
+            var dataSource = new OverpassOsmDataSource(new HttpClient(new FakeHttpMessageHandler(HttpStatusCode.OK, "not json")));
+            var sut = new RouteBetweenPointsHandler(placeLookup, dataSource, new OsmEntityFinder());
+
+            // Act & Assert
+            var exception = await Assert.ThrowsExceptionAsync<OsmDataUnavailableException>(
+                () => sut.RouteAsync("Origin", "Destination", "car", avoidMotorway: false));
+            Assert.IsInstanceOfType(exception.InnerException, typeof(InvalidOperationException));
+        }
     }
 }

@@ -61,6 +61,7 @@ namespace OsmToolkit.Mcp.Tools
         /// <exception cref="ArgumentException">Thrown when <paramref name="place"/> is null or empty.</exception>
         /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="radiusMeters"/> or <paramref name="limit"/> is not greater than zero.</exception>
         /// <exception cref="PlaceNotFoundException">Thrown when no place matches <paramref name="place"/>.</exception>
+        /// <exception cref="OsmDataUnavailableException">Thrown when OSM data for the search area could not be fetched.</exception>
         public async Task<IReadOnlyList<NearPointMatch>> FindAsync(
             string place,
             double radiusMeters,
@@ -81,7 +82,7 @@ namespace OsmToolkit.Mcp.Tools
 
             var location = await _placeLookup.FindAsync(place, cancellationToken);
             var bounds = BoundsFromRadius(location.Latitude, location.Longitude, radiusMeters);
-            var data = await _dataSource.GetOsmDataAsync(bounds, cancellationToken);
+            var data = await OsmDataFetcher.FetchAsync(_dataSource, bounds, cancellationToken);
             var withinRadius = _withinDistanceFinder.FindNearByRadius(data, location.Latitude, location.Longitude, radiusMeters);
 
             var tagFilter = tags is { Count: > 0 } ? tags.ToDictionary(kv => kv.Key, kv => kv.Value) : null;

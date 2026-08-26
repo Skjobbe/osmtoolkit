@@ -212,5 +212,22 @@ namespace OsmToolkit.Tests.Mcp
                 () => sut.SearchAsync("Nonexistentplacexyz", new Dictionary<string, string?> { ["amenity"] = "cafe" }));
             Assert.AreEqual("Nonexistentplacexyz", exception.PlaceName);
         }
+
+        [TestMethod]
+        public async Task SearchAsync_WhenOverpassReportsRemark_ThrowsOsmDataUnavailableException()
+        {
+            // Arrange - an HTTP 200 response carrying a top-level "remark" field is how Overpass reports a
+            // server-side query failure (e.g. hitting its execution timeout); maxRetryAttempts: 0 keeps the
+            // test from paying for #29's retry delay.
+            const string remarkJson = """{ "version": 0.6, "remark": "runtime error: Query timed out." }""";
+            var placeLookup = new NominatimPlaceLookup(new HttpClient(new FakeHttpMessageHandler(HttpStatusCode.OK, ValidNominatimJson)));
+            var dataSource = new OverpassOsmDataSource(new HttpClient(new FakeHttpMessageHandler(HttpStatusCode.OK, remarkJson)), maxRetryAttempts: 0);
+            var sut = new SearchByTagsInAreaHandler(placeLookup, dataSource, new OsmEntityFinder());
+
+            // Act & Assert
+            var exception = await Assert.ThrowsExceptionAsync<OsmDataUnavailableException>(
+                () => sut.SearchAsync("Fredrikstad", new Dictionary<string, string?> { ["amenity"] = "cafe" }));
+            Assert.IsInstanceOfType(exception.InnerException, typeof(OverpassQueryFailedException));
+        }
     }
 }

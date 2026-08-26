@@ -64,6 +64,7 @@ namespace OsmToolkit.Mcp.Tools
         /// <exception cref="ArgumentException">Thrown when <paramref name="origin"/> or <paramref name="destination"/> is null or empty, or <paramref name="travelMode"/> is not a recognized value.</exception>
         /// <exception cref="PlaceNotFoundException">Thrown when no place matches <paramref name="origin"/> or <paramref name="destination"/>.</exception>
         /// <exception cref="ArgumentOutOfRangeException">Thrown when the area spanning <paramref name="origin"/> and <paramref name="destination"/> exceeds <see cref="OverpassOsmDataSource"/>'s area guardrail.</exception>
+        /// <exception cref="OsmDataUnavailableException">Thrown when OSM data for the area spanning <paramref name="origin"/> and <paramref name="destination"/> could not be fetched.</exception>
         public async Task<RouteResult> RouteAsync(
             string origin,
             string destination,
@@ -90,7 +91,7 @@ namespace OsmToolkit.Mcp.Tools
             var destinationLocation = destinationLocationTask.Result;
 
             var bounds = BoundsSpanning(originLocation, destinationLocation);
-            var data = await _dataSource.GetOsmDataAsync(bounds, cancellationToken);
+            var data = await OsmDataFetcher.FetchAsync(_dataSource, bounds, cancellationToken);
 
             var pathOptions = new PathOptions(mode, avoidMotorway);
             var path = _shortestPathFinder.FindShortestPath(
