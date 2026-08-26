@@ -5,6 +5,7 @@ using OsmToolkit.DataSources.Logging;
 using OsmToolkit.Serialization.Json;
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -42,10 +43,16 @@ namespace OsmToolkit.DataSources
         /// The default total size limit of the in-memory cache, in weighted OSM elements (nodes + ways + relations).
         /// </summary>
         internal const long DefaultCacheSizeLimit = 200_000L;
+        /// <summary>
+        /// The default number of additional attempts made after a transient Overpass failure before giving up.
+        /// A value of 0 disables retry entirely, preserving the original fail-fast behavior.
+        /// </summary>
+        internal const int DefaultMaxRetryAttempts = 1;
 
         private const string RepositoryUrl = "https://github.com/Skjobbe/osmtoolkit";
         private const string ProductName = "OsmToolkit";
         private const double KilometersPerDegreeLatitude = 111.32d;
+        private static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromSeconds(1);
 
         private static readonly HttpClient SharedHttpClient = new();
         private static readonly IMemoryCache SharedCache = new MemoryCache(new MemoryCacheOptions { SizeLimit = DefaultCacheSizeLimit });
@@ -72,6 +79,13 @@ namespace OsmToolkit.DataSources
         /// </summary>
         internal static IMemoryCache? DefaultCacheOverride { get; set; }
 
+        /// <summary>
+        /// Test seam allowing the delay between retry attempts to be shortened so retry tests don't have to wait
+        /// out the real backoff. Not intended for use by consumers; only visible within this assembly and to
+        /// <c>OsmToolkitTests</c>.
+        /// </summary>
+        internal static TimeSpan? RetryDelayOverride { get; set; }
+
         private readonly HttpClient _httpClient;
         private readonly IOsmJsonDeserializer _deserializer;
         private readonly ILogger<OverpassOsmDataSource> _logger;
@@ -81,6 +95,7 @@ namespace OsmToolkit.DataSources
         private readonly double _maxAreaSquareKilometers;
         private readonly TimeSpan _cacheDuration;
         private readonly IMemoryCache _cache;
+        private readonly int _maxRetryAttempts;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="OverpassOsmDataSource"/> class.
@@ -94,6 +109,11 @@ namespace OsmToolkit.DataSources
         /// <param name="maxAreaSquareKilometers">The ceiling on a requested bounding box's estimated area, in square kilometers, above which a request is rejected before any network call. Defaults to 10,000 km².</param>
         /// <param name="cacheDuration">How long a fetched result is retained in the in-memory cache before expiring. If not provided, defaults to 15 minutes.</param>
         /// <param name="cache">An optional <see cref="IMemoryCache"/> used to cache fetched results, typically the singleton registered by <c>AddOsmToolkit()</c>. If not provided, an internally-owned shared instance is used.</param>
+        /// <param name="maxRetryAttempts">
+        /// The number of additional attempts made after a transient Overpass failure (an HTTP 429/502/503/504 response,
+        /// or a <see cref="OverpassQueryFailedException"/>) before giving up. Defaults to 1. Pass 0 to disable retry
+        /// and fail fast on the first failure, regardless of its shape.
+        /// </param>
         public OverpassOsmDataSource(
             HttpClient? httpClient = null,
             IOsmJsonDeserializer? deserializer = null,
@@ -103,8 +123,12 @@ namespace OsmToolkit.DataSources
             long queryMaxSizeBytes = DefaultQueryMaxSizeBytes,
             double maxAreaSquareKilometers = DefaultMaxAreaSquareKilometers,
             TimeSpan? cacheDuration = null,
-            IMemoryCache? cache = null)
+            IMemoryCache? cache = null,
+            int maxRetryAttempts = DefaultMaxRetryAttempts)
         {
+            if (maxRetryAttempts < 0)
+                throw new ArgumentOutOfRangeException(nameof(maxRetryAttempts), maxRetryAttempts, "Must be zero or greater.");
+
             _httpClient = httpClient ?? DefaultHttpClientOverride ?? SharedHttpClient;
             _deserializer = deserializer ?? new OsmJsonDeserializer();
             _logger = logger ?? new NullLogger<OverpassOsmDataSource>();
@@ -114,6 +138,7 @@ namespace OsmToolkit.DataSources
             _maxAreaSquareKilometers = maxAreaSquareKilometers;
             _cacheDuration = cacheDuration ?? TimeSpan.FromMinutes(DefaultCacheDurationMinutes);
             _cache = cache ?? DefaultCacheOverride ?? SharedCache;
+            _maxRetryAttempts = maxRetryAttempts;
         }
 
         /// <inheritdoc />
@@ -165,10 +190,43 @@ namespace OsmToolkit.DataSources
             }
         }
 
+        /// <summary>
+        /// Runs the fetch-and-parse sequence, retrying up to <see cref="_maxRetryAttempts"/> additional times on a
+        /// transient failure (see <see cref="IsTransientFailure"/>) with a short fixed delay between attempts. Because
+        /// this runs inside the <see cref="Lazy{T}"/> that <see cref="FetchCoalescedAsync"/> coalesces concurrent
+        /// callers onto, a single retry sequence is shared by all of them rather than each paying for its own.
+        /// </summary>
         private async Task<OsmData> FetchAndCacheAsync(OsmCoordinateBounds bounds, CacheKey cacheKey, CancellationToken cancellationToken)
         {
             var query = BuildQuery(bounds);
+            var attempt = 0;
 
+            while (true)
+            {
+                try
+                {
+                    var data = await FetchOnceAsync(query, bounds, cancellationToken);
+
+                    var weight = data.Nodes.Count + data.Ways.Count + data.Relations.Count;
+                    _cache.Set(cacheKey, data, new MemoryCacheEntryOptions
+                    {
+                        Size = weight,
+                        AbsoluteExpirationRelativeToNow = _cacheDuration
+                    });
+
+                    return data;
+                }
+                catch (Exception ex) when (attempt < _maxRetryAttempts && IsTransientFailure(ex))
+                {
+                    attempt++;
+                    DataSourceLogMessages.LogRetrying(_logger, attempt, _maxRetryAttempts + 1, ex.Message);
+                    await Task.Delay(RetryDelayOverride ?? DefaultRetryDelay, cancellationToken);
+                }
+            }
+        }
+
+        private async Task<OsmData> FetchOnceAsync(string query, OsmCoordinateBounds bounds, CancellationToken cancellationToken)
+        {
             using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint)
             {
                 Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("data", query) })
@@ -198,15 +256,24 @@ namespace OsmToolkit.DataSources
 
             DataSourceLogMessages.LogFetchResult(_logger, data.Nodes.Count, data.Ways.Count, data.Relations.Count);
 
-            var weight = data.Nodes.Count + data.Ways.Count + data.Relations.Count;
-            _cache.Set(cacheKey, data, new MemoryCacheEntryOptions
-            {
-                Size = weight,
-                AbsoluteExpirationRelativeToNow = _cacheDuration
-            });
-
             return data;
         }
+
+        /// <summary>
+        /// Identifies failures worth retrying: HTTP-level responses Overpass returns under load or during a
+        /// deployment (429, 502, 503, 504), and <see cref="OverpassQueryFailedException"/> (Overpass's HTTP-200
+        /// server-side timeout/memory-ceiling failure). A malformed/unparseable response body is deliberately not
+        /// retried, since the same failure would just recur.
+        /// </summary>
+        private static bool IsTransientFailure(Exception ex) => ex switch
+        {
+            HttpRequestException httpRequestException => httpRequestException.StatusCode is HttpStatusCode.TooManyRequests
+                or HttpStatusCode.BadGateway
+                or HttpStatusCode.ServiceUnavailable
+                or HttpStatusCode.GatewayTimeout,
+            OverpassQueryFailedException => true,
+            _ => false
+        };
 
         private OsmData ParseResponse(string body, OsmJsonDeserializer deserializer)
         {
@@ -226,7 +293,7 @@ namespace OsmToolkit.DataSources
                 if (remark is not null)
                 {
                     DataSourceLogMessages.LogRemarkDetected(_logger, remark);
-                    throw new InvalidOperationException(remark);
+                    throw new OverpassQueryFailedException(remark);
                 }
 
                 return deserializer.Deserialize(document);
@@ -239,7 +306,7 @@ namespace OsmToolkit.DataSources
             if (remark is not null)
             {
                 DataSourceLogMessages.LogRemarkDetected(_logger, remark);
-                throw new InvalidOperationException(remark);
+                throw new OverpassQueryFailedException(remark);
             }
 
             return await _deserializer.DeserializeAsync(body, cancellationToken);

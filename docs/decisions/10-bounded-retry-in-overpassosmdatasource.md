@@ -1,0 +1,31 @@
+# 010 — Bounded retry with fixed backoff in OverpassOsmDataSource
+
+## Context
+ADR-003 deliberately left `IOsmDataSource` without retry, on the grounds that hiding delays from the consumer without knowing its tolerance for wait time was worse than surfacing the failure immediately. That was a reasoned default, not a permanent ban - the ADR's own alternatives section only rejected *unbounded*, dependency-heavy retry (Polly), and its consequences section explicitly left the door open for a consumer to add retry itself.
+
+Manual verification of #26 (`find_near_point`) against a real MCP client hit exactly the failure mode ADR-003 anticipated: a tag-filtered Overpass call failed twice in a row (10s, then 16s) before succeeding on a third attempt (4s). A prior debugging session captured the same failure shape from the code path Overpass uses to report a server-side query timeout - an HTTP 200 response carrying a `remark` field, previously surfaced as a generic `InvalidOperationException`. With #3's MCP tools now the primary consumer, and every one of them going straight to a hard failure on Overpass's very ordinary rate-limiting/timeout behavior (documented as expected under load, ADR-001), the "consumer decides" default stopped being a live option - #3 has no better place to put this than where the failure originates, and MCP tool callers have no way to retry a call whose result they already gave up on.
+
+## Decision
+Retry lives inside `OverpassOsmDataSource.FetchAndCacheAsync`, not a separate decorator around `IOsmDataSource`:
+
+- A new constructor parameter, `maxRetryAttempts` (default `1`), bounds the number of *additional* attempts after the first. `0` reproduces ADR-003's original fail-fast behavior exactly, so that default stays available to any caller who wants it - the opt-out ADR-003 cared about is preserved, just inverted as the non-default choice.
+- Retry triggers only on failure shapes considered transient: an `HttpRequestException` carrying status 429, 502, 503, or 504, or the new `OverpassQueryFailedException` (see below). Every other failure - a non-transient HTTP status, a malformed/unparseable response body - propagates immediately, unretried, since retrying it would just reproduce the same failure.
+- Backoff between attempts is a single fixed delay (~1s), not an exponential/jittered scheme. With only one retry by default, the added complexity of a real backoff curve has no payoff; ADR-003 already rejected pulling in Polly for this class of problem, and a hand-rolled curve would carry the same complexity without the dependency.
+- `OverpassQueryFailedException` replaces the generic `InvalidOperationException` previously thrown when Overpass's response carries a top-level `remark` field (its way of reporting a server-side query timeout or memory-ceiling hit inside an HTTP 200 response). This split exists purely so the retry predicate - and #30's planned error handling - can tell "Overpass says try again" apart from "the response body cannot be parsed at all," which remains a plain `InvalidOperationException` and stays unretried.
+- The retry loop sits inside the fetch that `FetchCoalescedAsync`'s `Lazy<Task<OsmData>>` already coalesces (ADR-004). Concurrent callers for the same bounds during a cache miss therefore share one retry sequence automatically; none of ADR-004's coalescing design needed to change for this.
+- `NominatimPlaceLookup` is explicitly out of scope for this pass. It shares ADR-003's original "no retry" position, but no failure has actually been observed there - adding speculative retry now would be exactly the kind of "isn't worth building speculatively" case #3's original spec called out. Revisit if a real failure shows up.
+
+This revises ADR-003's *default*, not its reasoning. ADR-003 is left unedited; this ADR records why the default changed once #3 turned "the consumer decides" into "there is no consumer left to decide."
+
+## Alternatives considered
+- **A decorator wrapping `IOsmDataSource`, kept separate from `OverpassOsmDataSource`**: would let "no retry" and "retry" coexist as two composable pieces, matching ADR-003's original framing more literally. Rejected because it would need to either duplicate the coalescing awareness `FetchAndCacheAsync` already has, or wrap outside `FetchCoalescedAsync` and lose the "one retry sequence per coalesced fetch" property outright - every concurrent caller would retry independently, multiplying load against Overpass precisely when it's already struggling. Putting retry inside the class it needs to cooperate with was simpler than re-deriving that cooperation from outside.
+- **Exponential backoff with jitter**: rejected as effort disproportionate to a single retry. Worth reconsidering only if `maxRetryAttempts` grows beyond 1-2 in practice.
+- **Retry on any exception**: rejected - retrying a malformed-response failure or a genuine client bug wastes the fixed delay on a failure that will recur identically, and masks bugs that should surface immediately instead of being silently retried once.
+- **Deriving `OverpassQueryFailedException` from `InvalidOperationException`** to preserve source compatibility for any external catch handler: rejected - `OverpassOsmDataSource` is `internal`, so no consumer outside this assembly could have been catching this specific exception type by name in the first place; only the `IOsmDataSource` interface is public, and its `GetOsmDataAsync` never documented specific exception types as part of its contract.
+
+## Consequences
+A caller that previously got a hard failure within a couple of seconds now may wait up to ~1 extra second (the fixed backoff) before either succeeding or failing, when the failure shape is one of the retryable ones. This trades a small worst-case latency increase for smoothing over the exact flakiness #26's manual verification observed.
+
+Any code (in this repo or a consumer) that was catching `InvalidOperationException` specifically to detect Overpass's remark-carrying timeout must now catch `OverpassQueryFailedException` instead; a catch on `InvalidOperationException` for a genuinely malformed response is unaffected.
+
+#30 (error handling for the MCP tools) can now distinguish "Overpass says try again" from "the response was garbage" using the exception type alone, without re-parsing a message string.

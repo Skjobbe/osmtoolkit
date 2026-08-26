@@ -22,5 +22,8 @@ namespace OsmToolkit.DataSources.Logging
 
         [LoggerMessage(LogLevel.Error, Message = "Overpass query failed server-side: {Remark}")]
         internal static partial void LogRemarkDetected(ILogger logger, string remark);
+
+        [LoggerMessage(LogLevel.Warning, Message = "Overpass fetch attempt {Attempt} of {TotalAttempts} failed with a transient error ({Reason}); retrying.")]
+        internal static partial void LogRetrying(ILogger logger, int attempt, int totalAttempts, string reason);
     }
 }

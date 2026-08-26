@@ -2,13 +2,13 @@ using Microsoft.Extensions.Caching.Memory;
 using OsmToolkit.DataSources;
 using System.Net;
 using System.Text;
+using System.Linq;
 
 namespace OsmToolkit.Tests.DataSources
 {
     internal class FakeHttpMessageHandler : HttpMessageHandler
     {
-        private readonly HttpStatusCode _statusCode;
-        private readonly string _responseContent;
+        private readonly (HttpStatusCode StatusCode, string Content)[] _responses;
         private readonly TimeSpan _delay;
 
         public HttpRequestMessage? LastRequest { get; private set; }
@@ -16,9 +16,18 @@ namespace OsmToolkit.Tests.DataSources
         public int InvocationCount { get; private set; }
 
         public FakeHttpMessageHandler(HttpStatusCode statusCode, string responseContent, TimeSpan? delay = null)
+            : this(new[] { (statusCode, responseContent) }, delay)
         {
-            _statusCode = statusCode;
-            _responseContent = responseContent;
+        }
+
+        /// <summary>
+        /// Returns one queued response per call, in order; once the queue is exhausted, every further call keeps
+        /// returning the last queued response. Used to script a transient failure followed by a success (or vice
+        /// versa) for retry tests.
+        /// </summary>
+        public FakeHttpMessageHandler(IReadOnlyList<(HttpStatusCode StatusCode, string Content)> responses, TimeSpan? delay = null)
+        {
+            _responses = responses.ToArray();
             _delay = delay ?? TimeSpan.Zero;
         }
 
@@ -31,9 +40,10 @@ namespace OsmToolkit.Tests.DataSources
             if (_delay > TimeSpan.Zero)
                 await Task.Delay(_delay, cancellationToken);
 
-            return new HttpResponseMessage(_statusCode)
+            var (statusCode, content) = _responses[Math.Min(InvocationCount - 1, _responses.Length - 1)];
+            return new HttpResponseMessage(statusCode)
             {
-                Content = new StringContent(_responseContent, Encoding.UTF8, "application/json")
+                Content = new StringContent(content, Encoding.UTF8, "application/json")
             };
         }
     }
@@ -62,6 +72,9 @@ namespace OsmToolkit.Tests.DataSources
             {
                 SizeLimit = OverpassOsmDataSource.DefaultCacheSizeLimit
             });
+
+            // Retry tests don't need to wait out the real ~1s backoff to prove the retry happened.
+            OverpassOsmDataSource.RetryDelayOverride = TimeSpan.Zero;
         }
 
         [TestCleanup]
@@ -69,6 +82,7 @@ namespace OsmToolkit.Tests.DataSources
         {
             OverpassOsmDataSource.DefaultHttpClientOverride = null;
             OverpassOsmDataSource.DefaultCacheOverride = null;
+            OverpassOsmDataSource.RetryDelayOverride = null;
         }
 
         [TestMethod]
@@ -149,7 +163,7 @@ namespace OsmToolkit.Tests.DataSources
             // Arrange
             var handler = new FakeHttpMessageHandler(HttpStatusCode.TooManyRequests, string.Empty);
             var httpClient = new HttpClient(handler);
-            var sut = new OverpassOsmDataSource(httpClient);
+            var sut = new OverpassOsmDataSource(httpClient, maxRetryAttempts: 0);
 
             // Act
             var exception = await Assert.ThrowsExceptionAsync<HttpRequestException>(
@@ -160,7 +174,7 @@ namespace OsmToolkit.Tests.DataSources
         }
 
         [TestMethod]
-        public async Task GetOsmDataAsync_WhenResponseHasRemarkField_ThrowsInvalidOperationExceptionWithRemarkText()
+        public async Task GetOsmDataAsync_WhenResponseHasRemarkField_ThrowsOverpassQueryFailedExceptionWithRemarkText()
         {
             // Arrange
             const string remarkText = "runtime error: Query timed out in \"query\" at line 5 after 26 seconds.";
@@ -175,10 +189,10 @@ namespace OsmToolkit.Tests.DataSources
                 """;
             var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, remarkJson);
             var httpClient = new HttpClient(handler);
-            var sut = new OverpassOsmDataSource(httpClient);
+            var sut = new OverpassOsmDataSource(httpClient, maxRetryAttempts: 0);
 
             // Act
-            var exception = await Assert.ThrowsExceptionAsync<InvalidOperationException>(
+            var exception = await Assert.ThrowsExceptionAsync<OverpassQueryFailedException>(
                 () => sut.GetOsmDataAsync(Bounds));
 
             // Assert
@@ -359,6 +373,118 @@ namespace OsmToolkit.Tests.DataSources
             // Act & Assert
             await Assert.ThrowsExceptionAsync<InvalidOperationException>(
                 () => sut.GetOsmDataAsync(Bounds));
+            Assert.AreEqual(1, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenFirstAttemptReturnsTransientStatus_RetriesAndReturnsResultFromSecondAttempt()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(new[]
+            {
+                (HttpStatusCode.ServiceUnavailable, string.Empty),
+                (HttpStatusCode.OK, ValidOverpassJson)
+            });
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var result = await sut.GetOsmDataAsync(Bounds);
+
+            // Assert
+            Assert.AreEqual(1, result.Nodes.Count);
+            Assert.AreEqual(2, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenFirstAttemptHasRemark_RetriesAndReturnsResultFromSecondAttempt()
+        {
+            // Arrange
+            const string remarkJson = """
+                {
+                  "version": 0.6,
+                  "generator": "Overpass API",
+                  "elements": [],
+                  "remark": "runtime error: Query timed out in \"query\" at line 5 after 26 seconds."
+                }
+                """;
+            var handler = new FakeHttpMessageHandler(new[]
+            {
+                (HttpStatusCode.OK, remarkJson),
+                (HttpStatusCode.OK, ValidOverpassJson)
+            });
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var result = await sut.GetOsmDataAsync(Bounds);
+
+            // Assert
+            Assert.AreEqual(1, result.Nodes.Count);
+            Assert.AreEqual(2, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenEveryAttemptReturnsTransientStatus_RetriesOnceThenThrows()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.ServiceUnavailable, string.Empty);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var exception = await Assert.ThrowsExceptionAsync<HttpRequestException>(
+                () => sut.GetOsmDataAsync(Bounds));
+
+            // Assert
+            Assert.AreEqual(HttpStatusCode.ServiceUnavailable, exception.StatusCode);
+            Assert.AreEqual(2, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WhenResponseIsNonTransientNonSuccessStatus_ThrowsWithoutRetrying()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.NotFound, string.Empty);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var exception = await Assert.ThrowsExceptionAsync<HttpRequestException>(
+                () => sut.GetOsmDataAsync(Bounds));
+
+            // Assert
+            Assert.AreEqual(HttpStatusCode.NotFound, exception.StatusCode);
+            Assert.AreEqual(1, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithMaxRetryAttemptsZero_ThrowsOnFirstTransientFailureWithoutRetrying()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.ServiceUnavailable, string.Empty);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient, maxRetryAttempts: 0);
+
+            // Act
+            var exception = await Assert.ThrowsExceptionAsync<HttpRequestException>(
+                () => sut.GetOsmDataAsync(Bounds));
+
+            // Assert
+            Assert.AreEqual(HttpStatusCode.ServiceUnavailable, exception.StatusCode);
+            Assert.AreEqual(1, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public void Constructor_WithNegativeMaxRetryAttempts_ThrowsArgumentOutOfRangeException()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+
+            // Act & Assert
+            Assert.ThrowsException<ArgumentOutOfRangeException>(
+                () => new OverpassOsmDataSource(httpClient, maxRetryAttempts: -1));
         }
     }
 }
