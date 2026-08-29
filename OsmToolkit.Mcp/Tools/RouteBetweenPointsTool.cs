@@ -19,6 +19,6 @@ namespace OsmToolkit.Mcp.Tools
             [Description("The mode of travel to route for: 'foot', 'bicycle', 'moped', or 'car'.")] string travelMode,
             [Description("Whether to avoid motorways/highways when routing.")] bool avoidMotorway,
             CancellationToken cancellationToken)
-            => await handler.RouteAsync(origin, destination, travelMode, avoidMotorway, cancellationToken);
+            => await McpErrorTranslator.TranslateKnownFailuresAsync(() => handler.RouteAsync(origin, destination, travelMode, avoidMotorway, cancellationToken));
     }
 }

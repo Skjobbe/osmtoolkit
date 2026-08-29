@@ -16,9 +16,9 @@ namespace OsmToolkit.Mcp.Tools
             FindNearPointHandler handler,
             [Description("The place to search near, as a free-text name (e.g. 'Fredrikstad', 'Oslo City Hall'). Resolved to a geographic centroid by geocoding.")] string place,
             [Description("The search radius around the place, in meters.")] double radiusMeters,
-            [Description("Optional OSM tag filters to match, as exact key-value pairs (e.g. amenity=cafe). Omit to match any node.")] Dictionary<string, string>? tags,
             [Description("The maximum number of nodes to return, ordered by distance from the place.")] int limit,
-            CancellationToken cancellationToken)
-            => await handler.FindAsync(place, radiusMeters, tags, limit, cancellationToken);
+            [Description("Optional OSM tag filters to match, as exact key-value pairs (e.g. amenity=cafe). Omit to match any node.")] Dictionary<string, string>? tags = null,
+            CancellationToken cancellationToken = default)
+            => await McpErrorTranslator.TranslateKnownFailuresAsync(() => handler.FindAsync(place, radiusMeters, tags, limit, cancellationToken));
     }
 }
