@@ -1,5 +1,9 @@
 # OsmToolkit
 
+[![CI](https://github.com/Skjobbe/osmtoolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/Skjobbe/osmtoolkit/actions/workflows/ci.yml)
+[![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet)](https://dotnet.microsoft.com/download/dotnet/8.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A .NET 8 library for reading, writing, searching, and analysing [OpenStreetMap](https://www.openstreetmap.org/) data — and an [MCP](https://modelcontextprotocol.io/) server that exposes it to AI agents like Claude, so they can answer geographic questions ("what cafes are near Oslo City Hall?", "route me from A to B on foot") against live map data instead of guessing.
 
 ## Why this exists
@@ -13,18 +17,18 @@ The original group project's own API documentation is kept in `docs/` for refere
 ## Architecture
 
 ```
-                     ┌─────────────────────────┐
-   Claude Desktop /  │      OsmToolkit.Mcp      │
-   any MCP client  ──┼─▶  find_near_point        │
-   (stdio transport)  │  search_by_tags_in_area  │
-                     │  route_between_points     │
-                     └────────────┬─────────────┘
-                                  │ IOsmDataSource / ITagFilteredOsmDataSource / IPlaceLookup
-                     ┌────────────▼─────────────┐
-                     │        OsmToolkit          │
-                     │  (registered via           │
-                     │   AddOsmToolkit())         │
-                     ├────────────────────────────┤
+                     ┌─────────────────────────────┐
+Claude Desktop /     │       OsmToolkit.Mcp        │
+any MCP client  ──▶  │  find_near_point            │
+(stdio transport)    │  search_by_tags_in_area     │
+                     │  route_between_points       │
+                     └────┬────────────────────────┘
+                          │ IOsmDataSource / ITagFilteredOsmDataSource / IPlaceLookup
+                     ┌────▼────────────────────────┐
+                     │         OsmToolkit          │
+                     │ (registered via             │
+                     │  AddOsmToolkit())           │
+                     ├─────────────────────────────┤
                      │ Geocoding  → Nominatim      │
                      │ DataSources → Overpass API  │
                      │   (retry, in-flight         │
@@ -33,7 +37,7 @@ The original group project's own API documentation is kept in `docs/` for refere
                      │   nearby/radius/path search │
                      │ Serialization → .osm XML/   │
                      │   JSON read & write         │
-                     └────────────────────────────┘
+                     └─────────────────────────────┘
 ```
 
 - **`OsmToolkit`** — the core library. Everything is interface-driven and registered through `AddOsmToolkit()` (`OsmToolkit/Setup/ServiceCollectionExtensions.cs`), so a consumer only ever depends on interfaces (`IOsmDataSource`, `IOsmFinderV2<T>`, `IPlaceLookup`, ...), never concrete classes.
@@ -79,14 +83,14 @@ This starts the server on stdio and waits for a client to connect — there's no
 
 ### Connect it to Claude Desktop
 
-Add an entry to Claude Desktop's config file (`%APPDATA%\Claude\claude_desktop_config.json` on Windows, `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Build first (`dotnet build`), then add an entry to Claude Desktop's config file (`%APPDATA%\Claude\claude_desktop_config.json` on Windows, `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS) pointing at the built DLL directly — faster to start than `dotnet run --project` and what's actually verified against a real Claude Desktop session:
 
 ```json
 {
   "mcpServers": {
     "osmtoolkit": {
       "command": "dotnet",
-      "args": ["run", "--project", "C:\\path\\to\\osmtoolkit\\OsmToolkit.Mcp"]
+      "args": ["C:\\path\\to\\osmtoolkit\\OsmToolkit.Mcp\\bin\\Debug\\net8.0\\OsmToolkit.Mcp.dll"]
     }
   }
 }
@@ -162,7 +166,7 @@ Screenshots below are real Claude Desktop conversations against the running `Osm
 
    ![Claude Desktop listing three real cafes found in Gamlebyen, Fredrikstad via the search_by_tags_in_area tool](docs/screenshots/simple_lookup.png)
 
-2. **Tag-filtered area search.** *"Find all hospitals in Oslo."* → `search_by_tags_in_area` with `amenity=hospital`. Shows the tag-filter path distinct from the point-radius path above. (Not screenshotted here — Oslo's a big enough area that the Overpass fetch can take a while; try it live rather than relying on a stale screenshot.)
+2. **Tag-filtered area search, at city scale.** *"Find all hospitals in Oslo."* → `search_by_tags_in_area` with `amenity=hospital`, over a much bigger area than scenario 1's neighborhood-sized query. (Not screenshotted here — Oslo's a big enough area that the Overpass fetch can take a while; try it live rather than relying on a stale screenshot.)
 3. **Routing with a constraint.** *"How do I walk from Kongsten Fort to Gamlebyen in Fredrikstad, avoiding motorways?"* → `route_between_points` with `travelMode=foot`, `avoidMotorway=true` — a real ~1 km route, summarized into start/midpoint/end rather than dumping all 49 raw waypoints:
 
    ![Claude Desktop summarizing a real ~1 km walking route from Kongsten Fort to Gamlebyen as a start/midpoint/end table](docs/screenshots/routing_with_a_constraint.png)
@@ -179,3 +183,13 @@ Screenshots below are real Claude Desktop conversations against the running `Osm
 6. **No-result-but-not-an-error case.** *"Walk me from Fredrikstad train station to Gamlebyen"* → confirmed to return no path in the currently fetched data (`"description": "No valid path could be found."`) as a normal, non-error `RouteResult` — worth trying if you want a guaranteed no-path result, versus scenario 3's confirmed-working pair.
 
 *(Small aside on scenarios 5–6: capturing real examples for this README surfaced a real gap, recorded as [ADR-12](docs/decisions/12-surfacing-known-exception-messages-to-mcp-clients.md) — exception messages from `PlaceNotFoundException`/`OsmDataUnavailableException` weren't reaching the client at all under the MCP SDK's default error handling, and `find_near_point`'s optional `tags` parameter failed outright if a caller omitted it rather than passing `null`. Both are fixed in `OsmToolkit.Mcp.Tools` as of this README — the messages shown above are what the fix produces, not the aspiration.)*
+
+## What's next
+
+Everything above works today, against live data. What's tracked as open work, in roughly the order it'd add value:
+
+- **Understand free-text tag queries** ([#4](https://github.com/Skjobbe/osmtoolkit/issues/4)) — resolve a natural-language ask like "bike parking" or "vegan food" to the right OSM tag key/value pairs automatically, via embeddings, instead of requiring the caller to already know OSM's own tagging vocabulary (`amenity=bicycle_parking`, `diet:vegan=yes`, ...). Right now the caller (or the model driving it) has to know OSM tagging conventions; this is what would remove that requirement.
+- **An evaluation set, run in CI** ([#5](https://github.com/Skjobbe/osmtoolkit/issues/5)) — a fixed set of tag-matching and end-to-end questions with known-good answers, so a regression in *answer quality* (not just a failing unit test) gets caught automatically, the same discipline the ADRs above already apply to performance.
+- **Index Way/Relation gathering** ([#23](https://github.com/Skjobbe/osmtoolkit/issues/23)) — the one piece of the ADR-08/09 story still open: gathering the ways/relations touching a result node is now the dominant in-process cost inside `FindNearByRadius` (10.9 ms of which indexed node search is only 1.1 ms). Deliberately parked per ADR-09 until a query shape shows up where that cost is actually visible against network latency — a future tool that runs many finder calls against one already-fetched area, for instance.
+- **Stable identity for fetched data** ([#18](https://github.com/Skjobbe/osmtoolkit/issues/18)) — two independent fetches of the same area currently return different `OsmData` instances with no way to recognize they're the same content, so nothing can cache across them today. The real fix likely means making `OsmData`/`OsmEntity` genuinely immutable, which is a breaking change to a published public API — parked pending a deliberate major-version decision, not a quick patch.
+- **Deploy the MCP server remotely** ([#6](https://github.com/Skjobbe/osmtoolkit/issues/6)) — to Azure Container Apps, so it's reachable over the network instead of only runnable locally per machine, as it is today.
