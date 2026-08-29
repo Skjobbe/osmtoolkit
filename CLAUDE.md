@@ -15,7 +15,7 @@ This is a published package. `IOsmFinder` is marked `[Obsolete]` but must remain
 New methods go into new, small interfaces, not into existing ones.
 
 ## Tests
-MSTest, 251 tests. Naming: `Method_Scenario_ExpectedResult`.
+MSTest. Naming: `Method_Scenario_ExpectedResult`.
 Arrange/Act/Assert. One thing per test. New features must have tests.
 
 ## Commands

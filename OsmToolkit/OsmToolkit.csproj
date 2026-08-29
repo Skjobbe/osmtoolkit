@@ -12,7 +12,7 @@
 	<Authors>Group 8</Authors>
 	<Company>Hiof</Company>
 	<PackageId>OsmToolkit</PackageId>
-	<Description>A .NET library for working with OpenStreetMap (.osm) XML data</Description>
+	<Description>A .NET library for reading, writing, searching, and analysing OpenStreetMap data - from local .osm XML/JSON files or live from the Overpass API, with an MCP server for AI-agent access</Description>
 	<PackageTags>OSM;OpenStreetMap;GIS;Mapping;Geo</PackageTags>
   </PropertyGroup>
 	
