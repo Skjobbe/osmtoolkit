@@ -9,14 +9,15 @@ namespace OsmToolkit.Mcp.Tools
 {
     /// <summary>
     /// Application logic behind the <c>search_by_tags_in_area</c> MCP tool: resolves a place name to an area,
-    /// fetches OSM data for it, and filters it down to entities matching the requested tags. Depends only on
-    /// already-registered library interfaces, so it can be constructed and called directly in a test, without
-    /// any MCP-specific transport or attribute involved.
+    /// fetches OSM data for it scoped to the requested tags, and identifies which of the returned entities
+    /// actually carry those tags (as opposed to member nodes/ways pulled in only to resolve geometry). Depends
+    /// only on already-registered library interfaces, so it can be constructed and called directly in a test,
+    /// without any MCP-specific transport or attribute involved.
     /// </summary>
     public class SearchByTagsInAreaHandler
     {
         private readonly IPlaceLookup _placeLookup;
-        private readonly IOsmDataSource _dataSource;
+        private readonly ITagFilteredOsmDataSource _dataSource;
         private readonly IOsmValueFinder<OsmEntity> _valueFinder;
         private readonly ILogger<SearchByTagsInAreaHandler> _logger;
 
@@ -24,12 +25,17 @@ namespace OsmToolkit.Mcp.Tools
         /// Initializes a new instance of the <see cref="SearchByTagsInAreaHandler"/> class.
         /// </summary>
         /// <param name="placeLookup">Resolves the free-text place name to a geographic area.</param>
-        /// <param name="dataSource">Fetches OSM data for the resolved area.</param>
-        /// <param name="valueFinder">Filters the fetched data down to entities matching the requested tags.</param>
+        /// <param name="dataSource">Fetches OSM data for the resolved area, scoped to the requested tags.</param>
+        /// <param name="valueFinder">
+        /// Identifies which of the fetched entities actually carry the requested tags. <paramref name="dataSource"/>
+        /// only scopes the fetch itself - its result still mixes true matches with member nodes/ways recursed in
+        /// purely to resolve a matched way's/relation's geometry, and Overpass's own response carries no field
+        /// distinguishing the two, so this second, client-side pass is what tells them apart.
+        /// </param>
         /// <param name="logger">An optional logger for diagnostics. If not provided, a <see cref="NullLogger{SearchByTagsInAreaHandler}"/> is used.</param>
         public SearchByTagsInAreaHandler(
             IPlaceLookup placeLookup,
-            IOsmDataSource dataSource,
+            ITagFilteredOsmDataSource dataSource,
             IOsmValueFinder<OsmEntity> valueFinder,
             ILogger<SearchByTagsInAreaHandler>? logger = null)
         {
@@ -63,7 +69,7 @@ namespace OsmToolkit.Mcp.Tools
             SearchByTagsInAreaLogMessages.LogSearchStart(_logger, place, tags.Count);
 
             var location = await _placeLookup.FindAsync(place, cancellationToken);
-            var data = await OsmDataFetcher.FetchAsync(_dataSource, location.Bounds, cancellationToken);
+            var data = await OsmDataFetcher.FetchAsync(_dataSource, location.Bounds, tags, cancellationToken);
 
             var tagFilter = tags.ToDictionary(kv => kv.Key, kv => kv.Value ?? string.Empty);
             var filtered = _valueFinder.FindByTags(data, tagFilter);

@@ -214,6 +214,41 @@ namespace OsmToolkit.Tests.Mcp
         }
 
         [TestMethod]
+        public async Task SearchAsync_FetchesOsmDataScopedToRequestedTags()
+        {
+            // Arrange - this is the whole point of #31: the Overpass query sent must carry the requested tag
+            // filter, so the fetch itself is scoped server-side instead of pulling the full bounding box and
+            // discarding almost all of it client-side (the "30,000 nodes to find 5 cafes" waste #17 exists for).
+            var placeLookup = new NominatimPlaceLookup(new HttpClient(new FakeHttpMessageHandler(HttpStatusCode.OK, ValidNominatimJson)));
+            var overpassHandler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var dataSource = new OverpassOsmDataSource(new HttpClient(overpassHandler));
+            var sut = new SearchByTagsInAreaHandler(placeLookup, dataSource, new OsmEntityFinder());
+
+            // Act
+            await sut.SearchAsync("Fredrikstad", new Dictionary<string, string?> { ["amenity"] = "cafe", ["name"] = null });
+
+            // Assert
+            Assert.IsNotNull(overpassHandler.LastRequestBody);
+            var decodedBody = Uri.UnescapeDataString(overpassHandler.LastRequestBody!);
+            StringAssert.Contains(decodedBody, "[\"amenity\"=\"cafe\"][\"name\"]");
+        }
+
+        [TestMethod]
+        public async Task SearchAsync_WhenRecursedMemberNodeDoesNotCarryRequestedTags_IsExcludedFromMatches()
+        {
+            // Arrange - node 3 is only present in the (fake) response because it's a member of way 10, which
+            // matches the tag filter; it carries no tags itself and must not be reported as a match just because
+            // it came back in the same fetch.
+            var sut = CreateHandler(ValidNominatimJson, ValidOverpassJson);
+
+            // Act
+            var results = await sut.SearchAsync("Fredrikstad", new Dictionary<string, string?> { ["amenity"] = "cafe" });
+
+            // Assert
+            Assert.IsFalse(results.Any(r => r.Id == 3 && r.EntityType == "node"));
+        }
+
+        [TestMethod]
         public async Task SearchAsync_WhenOverpassReportsRemark_ThrowsOsmDataUnavailableException()
         {
             // Arrange - an HTTP 200 response carrying a top-level "remark" field is how Overpass reports a

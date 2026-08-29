@@ -18,6 +18,21 @@ namespace OsmToolkit.Tests.Mcp
             => throw _exception;
     }
 
+    /// <summary>
+    /// Fakes <see cref="ITagFilteredOsmDataSource"/> directly, mirroring <see cref="ThrowingOsmDataSource"/>, so
+    /// <see cref="OsmDataFetcher"/>'s tag-filtered overload can be verified without going through a real
+    /// (or fake-HTTP-backed) <see cref="OverpassOsmDataSource"/>.
+    /// </summary>
+    internal sealed class ThrowingTagFilteredOsmDataSource : ITagFilteredOsmDataSource
+    {
+        private readonly Exception _exception;
+
+        public ThrowingTagFilteredOsmDataSource(Exception exception) => _exception = exception;
+
+        public Task<OsmData> GetOsmDataAsync(OsmCoordinateBounds bounds, IReadOnlyDictionary<string, string?> tags, CancellationToken cancellationToken = default)
+            => throw _exception;
+    }
+
     [TestClass]
     public class OsmDataFetcherTests
     {
@@ -87,6 +102,49 @@ namespace OsmToolkit.Tests.Mcp
                 () => OsmDataFetcher.FetchAsync(dataSource, Bounds, CancellationToken.None));
         }
 
+        // --- ITagFilteredOsmDataSource overload ---
+
+        [TestMethod]
+        public async Task FetchAsync_WithTags_WhenDataSourceSucceeds_ReturnsData()
+        {
+            // Arrange
+            var expected = new OsmData(new OsmHeader(0.6));
+            var dataSource = new SucceedingTagFilteredOsmDataSource(expected);
+            var tags = new Dictionary<string, string?> { ["amenity"] = "cafe" };
+
+            // Act
+            var result = await OsmDataFetcher.FetchAsync(dataSource, Bounds, tags, CancellationToken.None);
+
+            // Assert
+            Assert.AreSame(expected, result);
+        }
+
+        [TestMethod]
+        public async Task FetchAsync_WithTags_WhenHttpRequestExceptionThrown_ThrowsOsmDataUnavailableExceptionWrappingIt()
+        {
+            // Arrange
+            var httpException = new HttpRequestException("Response status code does not indicate success: 504.");
+            var dataSource = new ThrowingTagFilteredOsmDataSource(httpException);
+            var tags = new Dictionary<string, string?> { ["amenity"] = "cafe" };
+
+            // Act & Assert
+            var exception = await Assert.ThrowsExceptionAsync<OsmDataUnavailableException>(
+                () => OsmDataFetcher.FetchAsync(dataSource, Bounds, tags, CancellationToken.None));
+            Assert.AreSame(httpException, exception.InnerException);
+        }
+
+        [TestMethod]
+        public async Task FetchAsync_WithTags_WhenUnrelatedExceptionThrown_PropagatesUnwrapped()
+        {
+            // Arrange
+            var dataSource = new ThrowingTagFilteredOsmDataSource(new ArgumentOutOfRangeException("bounds"));
+            var tags = new Dictionary<string, string?> { ["amenity"] = "cafe" };
+
+            // Act & Assert
+            await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(
+                () => OsmDataFetcher.FetchAsync(dataSource, Bounds, tags, CancellationToken.None));
+        }
+
         private sealed class SucceedingOsmDataSource : IOsmDataSource
         {
             private readonly OsmData _data;
@@ -94,6 +152,16 @@ namespace OsmToolkit.Tests.Mcp
             public SucceedingOsmDataSource(OsmData data) => _data = data;
 
             public Task<OsmData> GetOsmDataAsync(OsmCoordinateBounds bounds, CancellationToken cancellationToken = default)
+                => Task.FromResult(_data);
+        }
+
+        private sealed class SucceedingTagFilteredOsmDataSource : ITagFilteredOsmDataSource
+        {
+            private readonly OsmData _data;
+
+            public SucceedingTagFilteredOsmDataSource(OsmData data) => _data = data;
+
+            public Task<OsmData> GetOsmDataAsync(OsmCoordinateBounds bounds, IReadOnlyDictionary<string, string?> tags, CancellationToken cancellationToken = default)
                 => Task.FromResult(_data);
         }
     }
