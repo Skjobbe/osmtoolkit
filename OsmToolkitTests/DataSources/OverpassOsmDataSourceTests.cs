@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Caching.Memory;
 using OsmToolkit.DataSources;
+using OsmToolkit.Finders;
 using System.Net;
 using System.Text;
 using System.Linq;
@@ -485,6 +486,222 @@ namespace OsmToolkit.Tests.DataSources
             // Act & Assert
             Assert.ThrowsException<ArgumentOutOfRangeException>(
                 () => new OverpassOsmDataSource(httpClient, maxRetryAttempts: -1));
+        }
+
+        // --- ITagFilteredOsmDataSource ---
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithTags_BuildsQuery_WithExactMatchAndPresenceClausesAcrossAllEntityTypes()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            ITagFilteredOsmDataSource sut = new OverpassOsmDataSource(httpClient);
+            var tags = new Dictionary<string, string?> { ["amenity"] = "cafe", ["name"] = null };
+
+            // Act
+            await sut.GetOsmDataAsync(Bounds, tags);
+
+            // Assert
+            Assert.IsNotNull(handler.LastRequestBody);
+            var decodedBody = Uri.UnescapeDataString(handler.LastRequestBody!);
+            StringAssert.Contains(decodedBody, "node[\"amenity\"=\"cafe\"][\"name\"](");
+            StringAssert.Contains(decodedBody, "way[\"amenity\"=\"cafe\"][\"name\"](");
+            StringAssert.Contains(decodedBody, "relation[\"amenity\"=\"cafe\"][\"name\"](");
+            StringAssert.Contains(decodedBody, ">;");
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithTags_WhenBoundsIsNull_ThrowsArgumentNullException()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            ITagFilteredOsmDataSource sut = new OverpassOsmDataSource(httpClient);
+
+            // Act & Assert
+            await Assert.ThrowsExceptionAsync<ArgumentNullException>(
+                () => sut.GetOsmDataAsync(null!, new Dictionary<string, string?>()));
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithTags_WhenTagsIsNull_ThrowsArgumentNullException()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            ITagFilteredOsmDataSource sut = new OverpassOsmDataSource(httpClient);
+
+            // Act & Assert
+            await Assert.ThrowsExceptionAsync<ArgumentNullException>(
+                () => sut.GetOsmDataAsync(Bounds, null!));
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithTags_WhenBoundsExceedDefaultAreaCeiling_ThrowsWithoutInvokingHttpHandler()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            ITagFilteredOsmDataSource sut = new OverpassOsmDataSource(httpClient);
+            var oversizedBounds = new OsmCoordinateBounds(0.0, 0.0, 10.0, 10.0);
+
+            // Act & Assert
+            await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(
+                () => sut.GetOsmDataAsync(oversizedBounds, new Dictionary<string, string?> { ["amenity"] = "cafe" }));
+            Assert.IsNull(handler.LastRequest);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_FilteredAndUnfilteredFetchOverIdenticalBounds_AreDistinctCacheEntries()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            var sut = new OverpassOsmDataSource(httpClient);
+            var taggedSut = (ITagFilteredOsmDataSource)sut;
+
+            // Act
+            await sut.GetOsmDataAsync(Bounds);
+            await taggedSut.GetOsmDataAsync(Bounds, new Dictionary<string, string?> { ["amenity"] = "cafe" });
+
+            // Assert
+            Assert.AreEqual(2, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithTagsSuppliedInDifferentDictionaryOrder_SecondCallIsServedFromCache()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson);
+            var httpClient = new HttpClient(handler);
+            ITagFilteredOsmDataSource sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var first = await sut.GetOsmDataAsync(Bounds, new Dictionary<string, string?> { ["amenity"] = "cafe", ["name"] = null });
+            var second = await sut.GetOsmDataAsync(Bounds, new Dictionary<string, string?> { ["name"] = null, ["amenity"] = "cafe" });
+
+            // Assert
+            Assert.AreEqual(1, handler.InvocationCount);
+            Assert.AreEqual(first.Nodes.Count, second.Nodes.Count);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithTags_WhenCalledConcurrentlyForSameBoundsAndTagsDuringCacheMiss_CoalescesIntoSingleRequest()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.OK, ValidOverpassJson, delay: TimeSpan.FromMilliseconds(200));
+            var httpClient = new HttpClient(handler);
+            ITagFilteredOsmDataSource sut = new OverpassOsmDataSource(httpClient);
+            var tags = new Dictionary<string, string?> { ["amenity"] = "cafe" };
+
+            // Act
+            var firstTask = sut.GetOsmDataAsync(Bounds, tags);
+            var secondTask = sut.GetOsmDataAsync(Bounds, tags);
+            var results = await Task.WhenAll(firstTask, secondTask);
+
+            // Assert
+            Assert.AreEqual(1, handler.InvocationCount);
+            Assert.AreEqual(1, results[0].Nodes.Count);
+            Assert.AreEqual(1, results[1].Nodes.Count);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithTags_WhenFirstAttemptReturnsTransientStatus_RetriesAndReturnsResultFromSecondAttempt()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(new[]
+            {
+                (HttpStatusCode.ServiceUnavailable, string.Empty),
+                (HttpStatusCode.OK, ValidOverpassJson)
+            });
+            var httpClient = new HttpClient(handler);
+            ITagFilteredOsmDataSource sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var result = await sut.GetOsmDataAsync(Bounds, new Dictionary<string, string?> { ["amenity"] = "cafe" });
+
+            // Assert
+            Assert.AreEqual(1, result.Nodes.Count);
+            Assert.AreEqual(2, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithTags_WhenEveryAttemptReturnsTransientStatus_RetriesOnceThenThrows()
+        {
+            // Arrange
+            var handler = new FakeHttpMessageHandler(HttpStatusCode.ServiceUnavailable, string.Empty);
+            var httpClient = new HttpClient(handler);
+            ITagFilteredOsmDataSource sut = new OverpassOsmDataSource(httpClient);
+
+            // Act
+            var exception = await Assert.ThrowsExceptionAsync<HttpRequestException>(
+                () => sut.GetOsmDataAsync(Bounds, new Dictionary<string, string?> { ["amenity"] = "cafe" }));
+
+            // Assert
+            Assert.AreEqual(HttpStatusCode.ServiceUnavailable, exception.StatusCode);
+            Assert.AreEqual(2, handler.InvocationCount);
+        }
+
+        [TestMethod]
+        public async Task GetOsmDataAsync_WithTags_ResolvesSameWayGeometryAsUnfilteredFetchFilteredClientSide()
+        {
+            // Arrange
+            //
+            // Simulates the two fetches an end-to-end run would make against real Overpass: an unfiltered fetch
+            // that returns every entity in bounds (including an unrelated untagged node), and a tag-filtered fetch
+            // that returns only the matched way plus its member nodes pulled in via recursion (no unrelated node).
+            // Proves the filtered path's recursion resolves the same member-node coordinates for a tagged way as
+            // looking those nodes up in the unfiltered result - the reason issue #17/#32 exist in the first place.
+            const string unfilteredJson = """
+                {
+                  "version": 0.6,
+                  "generator": "Overpass API",
+                  "elements": [
+                    { "type": "node", "id": 10, "lat": 59.911, "lon": 10.757, "tags": {} },
+                    { "type": "node", "id": 11, "lat": 59.912, "lon": 10.758, "tags": {} },
+                    { "type": "node", "id": 12, "lat": 59.913, "lon": 10.759, "tags": {} },
+                    { "type": "way", "id": 100, "nodes": [10, 11], "tags": { "amenity": "cafe" } }
+                  ]
+                }
+                """;
+            const string filteredJson = """
+                {
+                  "version": 0.6,
+                  "generator": "Overpass API",
+                  "elements": [
+                    { "type": "way", "id": 100, "nodes": [10, 11], "tags": { "amenity": "cafe" } },
+                    { "type": "node", "id": 10, "lat": 59.911, "lon": 10.757, "tags": {} },
+                    { "type": "node", "id": 11, "lat": 59.912, "lon": 10.758, "tags": {} }
+                  ]
+                }
+                """;
+            var tagFilter = new Dictionary<string, string?> { ["amenity"] = "cafe" };
+
+            var unfilteredSut = new OverpassOsmDataSource(new HttpClient(new FakeHttpMessageHandler(HttpStatusCode.OK, unfilteredJson)));
+            ITagFilteredOsmDataSource filteredSut = new OverpassOsmDataSource(new HttpClient(new FakeHttpMessageHandler(HttpStatusCode.OK, filteredJson)));
+
+            // Act
+            var unfilteredData = await unfilteredSut.GetOsmDataAsync(Bounds);
+            var referenceWay = new OsmEntityFinder()
+                .FindByTags(unfilteredData, new Dictionary<string, string> { ["amenity"] = "cafe" })
+                .Ways.Single();
+            var referenceMemberCoordinates = referenceWay.NodeReferenceIds
+                .Select(id => unfilteredData.Nodes.Single(n => n.Id == id))
+                .ToDictionary(n => n.Id, n => (n.Latitude, n.Longitude));
+
+            var filteredData = await filteredSut.GetOsmDataAsync(Bounds, tagFilter);
+
+            // Assert
+            var filteredWay = filteredData.Ways.Single(w => w.Id == referenceWay.Id);
+            Assert.AreEqual(referenceMemberCoordinates.Count, filteredWay.NodeReferenceIds.Count);
+            foreach (var memberId in filteredWay.NodeReferenceIds)
+            {
+                var filteredNode = filteredData.Nodes.Single(n => n.Id == memberId);
+                var (expectedLatitude, expectedLongitude) = referenceMemberCoordinates[memberId];
+                Assert.AreEqual(expectedLatitude, filteredNode.Latitude);
+                Assert.AreEqual(expectedLongitude, filteredNode.Longitude);
+            }
         }
     }
 }

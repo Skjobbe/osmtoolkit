@@ -35,6 +35,7 @@ namespace OsmToolkit
             services.TryAddTransient<IShortestPathFinder, OsmEntityFinder>();
             services.AddMemoryCache(options => options.SizeLimit = OverpassOsmDataSource.DefaultCacheSizeLimit);
             services.TryAddTransient<IOsmDataSource, OverpassOsmDataSource>();
+            services.TryAddTransient<ITagFilteredOsmDataSource, OverpassOsmDataSource>();
             services.TryAddTransient<IPlaceLookup, NominatimPlaceLookup>();
 
             return services;

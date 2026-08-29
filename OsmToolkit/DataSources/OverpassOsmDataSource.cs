@@ -9,6 +9,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 
 namespace OsmToolkit.DataSources
@@ -17,7 +18,7 @@ namespace OsmToolkit.DataSources
     /// Fetches OSM data for a bounding box live from the Overpass API over HTTP.
     /// Repeated requests for the same bounds are served from an in-memory cache.
     /// </summary>
-    internal class OverpassOsmDataSource : IOsmDataSource
+    internal class OverpassOsmDataSource : IOsmDataSource, ITagFilteredOsmDataSource
     {
         /// <summary>
         /// The public Overpass API interpreter endpoint used when no endpoint override is supplied.
@@ -147,6 +148,29 @@ namespace OsmToolkit.DataSources
             if (bounds is null)
                 throw new ArgumentNullException(nameof(bounds), "Bounds cannot be null, must be defined.");
 
+            EnsureAreaWithinLimit(bounds);
+
+            var cacheKey = new CacheKey(bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude, TagSignature: null);
+            return await GetOsmDataCoreAsync(bounds, tags: null, cacheKey, cancellationToken);
+        }
+
+        /// <inheritdoc />
+        public async Task<OsmData> GetOsmDataAsync(OsmCoordinateBounds bounds, IReadOnlyDictionary<string, string?> tags, CancellationToken cancellationToken = default)
+        {
+            if (bounds is null)
+                throw new ArgumentNullException(nameof(bounds), "Bounds cannot be null, must be defined.");
+
+            if (tags is null)
+                throw new ArgumentNullException(nameof(tags), "Tags cannot be null, must be defined.");
+
+            EnsureAreaWithinLimit(bounds);
+
+            var cacheKey = new CacheKey(bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude, BuildTagSignature(tags));
+            return await GetOsmDataCoreAsync(bounds, tags, cacheKey, cancellationToken);
+        }
+
+        private void EnsureAreaWithinLimit(OsmCoordinateBounds bounds)
+        {
             var areaSquareKilometers = EstimateAreaSquareKilometers(bounds);
             if (areaSquareKilometers > _maxAreaSquareKilometers)
             {
@@ -154,31 +178,34 @@ namespace OsmToolkit.DataSources
                 throw new ArgumentOutOfRangeException(nameof(bounds), areaSquareKilometers,
                     $"Estimated area of {areaSquareKilometers:F0} km² exceeds the maximum allowed area of {_maxAreaSquareKilometers:F0} km².");
             }
+        }
 
-            var cacheKey = new CacheKey(bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude);
+        private async Task<OsmData> GetOsmDataCoreAsync(OsmCoordinateBounds bounds, IReadOnlyDictionary<string, string?>? tags, CacheKey cacheKey, CancellationToken cancellationToken)
+        {
             if (_cache.TryGetValue(cacheKey, out OsmData? cachedData) && cachedData is not null)
             {
                 DataSourceLogMessages.LogCacheHit(_logger, bounds.MinimumLatitude, bounds.MinimumLongitude, bounds.MaximumLatitude, bounds.MaximumLongitude);
                 return CloneForCaller(cachedData);
             }
 
-            var data = await FetchCoalescedAsync(bounds, cacheKey, cancellationToken);
+            var data = await FetchCoalescedAsync(bounds, tags, cacheKey, cancellationToken);
             return CloneForCaller(data);
         }
 
         /// <summary>
-        /// Coalesces concurrent fetches for identical <paramref name="cacheKey"/> bounds so that overlapping cache
-        /// misses share a single outbound Overpass request instead of each issuing their own. The winning caller's
-        /// <paramref name="cancellationToken"/> governs the shared request; a losing caller that cancels only stops
-        /// waiting on its own await, it does not cancel the in-flight fetch other callers are still waiting on.
+        /// Coalesces concurrent fetches for identical <paramref name="cacheKey"/> bounds (and tag filter, if any) so
+        /// that overlapping cache misses share a single outbound Overpass request instead of each issuing their own.
+        /// The winning caller's <paramref name="cancellationToken"/> governs the shared request; a losing caller that
+        /// cancels only stops waiting on its own await, it does not cancel the in-flight fetch other callers are
+        /// still waiting on.
         /// </summary>
-        private async Task<OsmData> FetchCoalescedAsync(OsmCoordinateBounds bounds, CacheKey cacheKey, CancellationToken cancellationToken)
+        private async Task<OsmData> FetchCoalescedAsync(OsmCoordinateBounds bounds, IReadOnlyDictionary<string, string?>? tags, CacheKey cacheKey, CancellationToken cancellationToken)
         {
             var inFlight = InFlightFetchesByCache.GetValue(_cache, static _ => new ConcurrentDictionary<CacheKey, Lazy<Task<OsmData>>>());
 
             var lazyFetch = inFlight.GetOrAdd(
                 cacheKey,
-                _ => new Lazy<Task<OsmData>>(() => FetchAndCacheAsync(bounds, cacheKey, cancellationToken), LazyThreadSafetyMode.ExecutionAndPublication));
+                _ => new Lazy<Task<OsmData>>(() => FetchAndCacheAsync(bounds, tags, cacheKey, cancellationToken), LazyThreadSafetyMode.ExecutionAndPublication));
 
             try
             {
@@ -196,9 +223,9 @@ namespace OsmToolkit.DataSources
         /// this runs inside the <see cref="Lazy{T}"/> that <see cref="FetchCoalescedAsync"/> coalesces concurrent
         /// callers onto, a single retry sequence is shared by all of them rather than each paying for its own.
         /// </summary>
-        private async Task<OsmData> FetchAndCacheAsync(OsmCoordinateBounds bounds, CacheKey cacheKey, CancellationToken cancellationToken)
+        private async Task<OsmData> FetchAndCacheAsync(OsmCoordinateBounds bounds, IReadOnlyDictionary<string, string?>? tags, CacheKey cacheKey, CancellationToken cancellationToken)
         {
-            var query = BuildQuery(bounds);
+            var query = BuildQuery(bounds, tags);
             var attempt = 0;
 
             while (true)
@@ -320,29 +347,82 @@ namespace OsmToolkit.DataSources
             new(data.Header, data.Bounds, data.Nodes, data.Ways, data.Relations);
 
         /// <summary>
-        /// Cache and in-flight-fetch key derived from a bounding box's four coordinate values, using exact equality.
+        /// Cache and in-flight-fetch key derived from a bounding box's four coordinate values plus an optional tag
+        /// filter signature, using exact equality. <see cref="TagSignature"/> is <c>null</c> for an unfiltered fetch
+        /// and a canonical (order-independent) encoding of the tag filter for a filtered fetch, so the two never
+        /// collide and two filtered fetches for the same tags - regardless of the order they were supplied in -
+        /// always land on the same entry.
         /// </summary>
-        private readonly record struct CacheKey(double MinimumLatitude, double MinimumLongitude, double MaximumLatitude, double MaximumLongitude);
+        private readonly record struct CacheKey(double MinimumLatitude, double MinimumLongitude, double MaximumLatitude, double MaximumLongitude, string? TagSignature);
 
-        private string BuildQuery(OsmCoordinateBounds bounds)
+        /// <summary>
+        /// Builds a canonical, order-independent string representation of a tag filter for use as part of a
+        /// <see cref="CacheKey"/>. Keys are sorted, and each key/value is length-prefixed so that no combination of
+        /// keys and values can be crafted to collide with a differently-shaped filter.
+        /// </summary>
+        private static string BuildTagSignature(IReadOnlyDictionary<string, string?> tags)
+        {
+            var builder = new StringBuilder();
+            foreach (var key in tags.Keys.OrderBy(k => k, StringComparer.Ordinal))
+            {
+                builder.Append(key.Length).Append(':').Append(key);
+                var value = tags[key];
+                if (value is null)
+                    builder.Append('N');
+                else
+                    builder.Append('V').Append(value.Length).Append(':').Append(value);
+            }
+            return builder.ToString();
+        }
+
+        private string BuildQuery(OsmCoordinateBounds bounds, IReadOnlyDictionary<string, string?>? tags = null)
         {
             var minLat = bounds.MinimumLatitude.ToString(CultureInfo.InvariantCulture);
             var minLon = bounds.MinimumLongitude.ToString(CultureInfo.InvariantCulture);
             var maxLat = bounds.MaximumLatitude.ToString(CultureInfo.InvariantCulture);
             var maxLon = bounds.MaximumLongitude.ToString(CultureInfo.InvariantCulture);
+            var tagClauses = tags is null ? string.Empty : BuildTagClauses(tags);
 
             return $"""
                 [out:json][timeout:{_queryTimeoutSeconds}][maxsize:{_queryMaxSizeBytes}];
                 (
-                  node({minLat},{minLon},{maxLat},{maxLon});
-                  way({minLat},{minLon},{maxLat},{maxLon});
-                  relation({minLat},{minLon},{maxLat},{maxLon});
+                  node{tagClauses}({minLat},{minLon},{maxLat},{maxLon});
+                  way{tagClauses}({minLat},{minLon},{maxLat},{maxLon});
+                  relation{tagClauses}({minLat},{minLon},{maxLat},{maxLon});
                 );
                 out body;
                 >;
                 out skel qt;
                 """;
         }
+
+        /// <summary>
+        /// Builds the Overpass-QL tag-filter clause chain (e.g. <c>["amenity"="cafe"]["name"]</c>) appended to each
+        /// entity statement. A <c>null</c> value produces a presence-only clause; a non-<c>null</c> value produces
+        /// an exact-match clause. Multiple tags AND together by virtue of Overpass-QL applying each bracketed clause
+        /// in sequence, matching <see cref="Finders.OsmEntityFinder.FindByTags(OsmData, Dictionary{string, string})"/>'s
+        /// existing AND semantics.
+        /// </summary>
+        private static string BuildTagClauses(IReadOnlyDictionary<string, string?> tags)
+        {
+            var builder = new StringBuilder();
+            foreach (var (key, value) in tags)
+            {
+                var escapedKey = EscapeOverpassQlString(key);
+                if (value is null)
+                    builder.Append('[').Append('"').Append(escapedKey).Append('"').Append(']');
+                else
+                    builder.Append('[').Append('"').Append(escapedKey).Append("\"=\"").Append(EscapeOverpassQlString(value)).Append('"').Append(']');
+            }
+            return builder.ToString();
+        }
+
+        /// <summary>
+        /// Escapes backslashes and double quotes so an arbitrary tag key or value can be safely embedded in an
+        /// Overpass-QL double-quoted string literal.
+        /// </summary>
+        private static string EscapeOverpassQlString(string value) =>
+            value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
         /// <summary>
         /// Checks the raw Overpass response body for a top-level <c>remark</c> field, which Overpass sets on an HTTP 200
